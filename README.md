@@ -63,10 +63,10 @@ Slack 연결 없이 LLM 응답, 웹 검색 등을 테스트할 수 있습니다.
 
 ```bash
 # 인수로 질문 전달
-python local_test.py "오늘 서울 날씨 알려줘"
+python localtest.py "오늘 서울 날씨 알려줘"
 
 # 대화형 입력 (Ctrl+D 로 종료)
-python local_test.py
+python localtest.py
 ```
 
 실행 예시:
