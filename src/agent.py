@@ -42,6 +42,7 @@ class SlackMentionAgent:
         system_message: str | None = None,
         history: list[dict[str, Any]] | None = None,
         on_stream: Callable[[str], None] | None = None,
+        on_step: Callable[[int, str, dict[str, Any]], None] | None = None,
     ):
         self.llm = llm
         self.context = context
@@ -52,6 +53,8 @@ class SlackMentionAgent:
         self.system_message = system_message
         self.history = history or []
         self.on_stream = on_stream
+        # on_step(step_num, phase, detail) — phases: "tool_use", "tool_result", "compose"
+        self.on_step = on_step
 
     def run(self, user_message: str) -> AgentResult:
         system = self._build_system_prompt()
@@ -70,7 +73,18 @@ class SlackMentionAgent:
             log_event(logger, "llm.hop", step=steps, stop=result.stop_reason, tool_calls=len(result.tool_calls))
 
             if not result.tool_calls:
-                return self._finalize(result.content, messages, image_url, steps, tool_calls_total, total_usage)
+                self._notify_step(steps, "compose", {})
+                final = self._compose_final(system, messages, fallback=result.content)
+                return AgentResult(
+                    text=final.strip(),
+                    image_url=image_url,
+                    steps=steps,
+                    tool_calls_count=tool_calls_total,
+                    token_usage=total_usage,
+                )
+
+            tool_names = [c.name for c in result.tool_calls]
+            self._notify_step(steps, "tool_use", {"tools": tool_names})
 
             messages.append(
                 {
@@ -92,6 +106,12 @@ class SlackMentionAgent:
                     tool_result = self.executor.execute(call)
                 log_event(logger, "tool.result", step=steps, tool=call.name, ok=tool_result.get("ok", False))
 
+                self._notify_step(
+                    steps,
+                    "tool_result",
+                    {"tool": call.name, "ok": bool(tool_result.get("ok")), "error": tool_result.get("error")},
+                )
+
                 if call.name == "generate_image" and tool_result.get("ok"):
                     permalink = (tool_result.get("result") or {}).get("permalink")
                     if permalink:
@@ -106,6 +126,7 @@ class SlackMentionAgent:
                 )
 
         # max_steps reached — force one final compose without tools.
+        self._notify_step(steps, "compose", {"max_steps_hit": True})
         final_text = self._compose_without_tools(system, messages)
         return AgentResult(text=final_text, image_url=image_url, steps=steps, tool_calls_count=tool_calls_total, token_usage=total_usage)
 
@@ -123,25 +144,18 @@ class SlackMentionAgent:
         args_blob = json.dumps(call.arguments or {}, sort_keys=True, ensure_ascii=False)
         return f"{call.name}:{hashlib.sha1(args_blob.encode()).hexdigest()[:12]}"
 
-    def _finalize(
-        self,
-        text: str,
-        messages: list[dict[str, Any]],  # noqa: ARG002
-        image_url: str | None,
-        steps: int,
-        tool_calls_count: int,
-        token_usage: dict[str, int],
-    ) -> AgentResult:
-        clean = (text or "").strip()
-        if self.on_stream and clean:
-            self.on_stream(clean)
-        return AgentResult(
-            text=clean,
-            image_url=image_url,
-            steps=steps,
-            tool_calls_count=tool_calls_count,
-            token_usage=token_usage,
-        )
+    def _compose_final(self, system: str, messages: list[dict[str, Any]], fallback: str) -> str:
+        """Emit the final answer, preferring streaming when a stream callback exists.
+
+        When `on_stream` is set we re-ask the LLM with `tools=None` and stream
+        deltas so the caller can surface them live. This costs one extra LLM
+        call but keeps the streaming path universal (OpenAI + Bedrock). When
+        no streaming is requested, we use the `fallback` content we already
+        have from the previous hop — no extra call.
+        """
+        if self.on_stream:
+            return self.llm.stream_chat(system, messages, on_delta=self.on_stream)
+        return fallback or ""
 
     def _compose_without_tools(self, system: str, messages: list[dict[str, Any]]) -> str:
         """Force a final answer when max_steps is reached — no tools permitted."""
@@ -153,3 +167,11 @@ class SlackMentionAgent:
             return self.llm.stream_chat(system, messages, on_delta=self.on_stream)
         result = self.llm.chat(system, messages, tools=None)
         return (result.content or "").strip()
+
+    def _notify_step(self, step: int, phase: str, detail: dict[str, Any]) -> None:
+        if not self.on_step:
+            return
+        try:
+            self.on_step(step, phase, detail)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("on_step callback failed: %s", exc)

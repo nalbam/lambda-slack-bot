@@ -150,3 +150,98 @@ def test_sanitize_error_truncates_long():
     exc = ValueError("x" * 1000)
     out = sanitize_error(exc)
     assert len(out) <= 300
+
+
+# --------------------------------------------------------------------------- #
+# StreamingMessage
+# --------------------------------------------------------------------------- #
+
+from src.slack_helpers import StreamingMessage
+
+
+def _slack_client_native_stream():
+    """Client whose api_call responds to chat.startStream/appendStream/stopStream."""
+    client = MagicMock()
+
+    def api_call(method, params=None, **_):
+        if method == "chat.startStream":
+            return {"ok": True, "channel": params["channel"], "ts": "1234.5678"}
+        if method == "chat.appendStream":
+            return {"ok": True, "channel": params["channel"], "ts": params["ts"]}
+        if method == "chat.stopStream":
+            return {"ok": True, "channel": params["channel"], "ts": params["ts"]}
+        raise AssertionError(f"unexpected api_call: {method}")
+
+    client.api_call.side_effect = api_call
+    return client
+
+
+def test_streaming_message_native_start_uses_api_call():
+    client = _slack_client_native_stream()
+    sm = StreamingMessage(client=client, channel="C1", thread_ts="ts1", placeholder=":robot:")
+    sm.start()
+    assert sm.ts == "1234.5678"
+    assert sm._native is True
+    client.api_call.assert_called_once()
+    assert client.api_call.call_args.args[0] == "chat.startStream"
+
+
+def test_streaming_message_fallback_when_native_fails():
+    client = MagicMock()
+    client.api_call.side_effect = SlackApiError("no", {"error": "method_deprecated"})
+    client.chat_postMessage.return_value = {"ok": True, "ts": "fallback-ts"}
+    sm = StreamingMessage(client=client, channel="C1", thread_ts="ts1")
+    sm.start()
+    assert sm.ts == "fallback-ts"
+    assert sm._native is False
+    client.chat_postMessage.assert_called_once()
+
+
+def test_streaming_message_append_throttles():
+    client = _slack_client_native_stream()
+    sm = StreamingMessage(client=client, channel="C1", thread_ts="ts1", min_interval=10.0)
+    sm.start()
+    # First append should flush (last_flush=0 -> elapsed > interval)
+    sm.append("hello ")
+    # Second append within interval: should buffer, not flush
+    sm.append("world")
+    # Count of appendStream calls should be <= 1 within this tight window
+    append_calls = [c for c in client.api_call.call_args_list if c.args[0] == "chat.appendStream"]
+    assert len(append_calls) <= 1
+
+
+def test_streaming_message_stop_finalizes_native():
+    client = _slack_client_native_stream()
+    sm = StreamingMessage(client=client, channel="C1", thread_ts="ts1")
+    sm.start()
+    sm.stop("final answer")
+    stop_calls = [c for c in client.api_call.call_args_list if c.args[0] == "chat.stopStream"]
+    assert len(stop_calls) == 1
+    assert stop_calls[0].kwargs["params"]["markdown_text"] == "final answer"
+
+
+def test_streaming_message_stop_fallback_uses_chat_update():
+    client = MagicMock()
+    client.api_call.side_effect = SlackApiError("no", {"error": "method_deprecated"})
+    client.chat_postMessage.return_value = {"ok": True, "ts": "fallback-ts"}
+    sm = StreamingMessage(client=client, channel="C1", thread_ts="ts1")
+    sm.start()
+    sm.stop("done")
+    client.chat_update.assert_called_with(channel="C1", ts="fallback-ts", text="done")
+
+
+def test_streaming_message_stop_is_idempotent():
+    client = _slack_client_native_stream()
+    sm = StreamingMessage(client=client, channel="C1", thread_ts="ts1")
+    sm.start()
+    sm.stop("a")
+    sm.stop("b")
+    stop_calls = [c for c in client.api_call.call_args_list if c.args[0] == "chat.stopStream"]
+    assert len(stop_calls) == 1  # only first stop fires
+
+
+def test_streaming_message_append_noop_before_start():
+    client = MagicMock()
+    sm = StreamingMessage(client=client, channel="C1", thread_ts="ts1")
+    sm.append("hi")  # should not explode, ts is None
+    client.api_call.assert_not_called()
