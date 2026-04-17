@@ -150,7 +150,7 @@ Coverage target 80%+, currently 86% overall. Key approach:
 - **Changing `DedupStore.reserve` to a read-then-write pattern** reintroduces the retry race.
 - **Losing the `id` prefix scheme** (`dedup:` vs `ctx:`) collides the two store types.
 - **Switching to `LoggerAdapter.info(extra=…)`** — in Python 3.12 the adapter's `process()` overwrites `extra`; keep going through `logger.logger` for `extra_fields`.
-- **Removing the SSRF host allowlist** in `read_attached_images` opens up arbitrary URL fetch with the bot token.
+- **Removing the SSRF host allowlist** (`SLACK_FILE_HOSTS`) shared by `read_attached_images` and `read_attached_document` (`_fetch_slack_file`) opens up arbitrary URL fetch with the bot token.
 - **Adding a tool without updating `ToolRegistry.specs()`** — the `@tool` decorator handles both dispatch and LLM schema from a single declaration; inline dict tricks will silently desync.
 
 ## Excluded (Phase 2+)

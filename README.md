@@ -120,7 +120,7 @@ aws iam attach-role-policy --role-name "${NAME}" --policy-arn "arn:aws:iam::${AC
 ### 2. GitHub 저장소 설정
 
 - **Secrets**: `AWS_ACCOUNT_ID`, `SLACK_BOT_TOKEN`, `SLACK_SIGNING_SECRET`, `OPENAI_API_KEY`, `XAI_API_KEY`(xAI 사용 시), `TAVILY_API_KEY`(선택)
-- **Variables**: `LLM_PROVIDER`, `LLM_MODEL`, `IMAGE_PROVIDER`, `IMAGE_MODEL`, `RESPONSE_LANGUAGE`, `ALLOWED_CHANNEL_IDS`, `ALLOWED_CHANNEL_MESSAGE`, `SYSTEM_MESSAGE`, `BOT_CURSOR`, `MAX_LEN_SLACK`, `MAX_OUTPUT_TOKENS`, `MAX_THROTTLE_COUNT`, `MAX_HISTORY_CHARS`, `AGENT_MAX_STEPS`, `LOG_LEVEL`
+- **Variables**: `LLM_PROVIDER`, `LLM_MODEL`, `IMAGE_PROVIDER`, `IMAGE_MODEL`, `RESPONSE_LANGUAGE`, `ALLOWED_CHANNEL_IDS`, `ALLOWED_CHANNEL_MESSAGE`, `SYSTEM_MESSAGE`, `BOT_CURSOR`, `MAX_LEN_SLACK`, `MAX_OUTPUT_TOKENS`, `MAX_THROTTLE_COUNT`, `MAX_HISTORY_CHARS`, `AGENT_MAX_STEPS`, `LOG_LEVEL`, `DEFAULT_TIMEZONE`, `MAX_DOC_CHARS`, `MAX_DOC_PAGES`, `MAX_DOC_BYTES`
 
 ### 3. 배포
 
@@ -199,6 +199,7 @@ DynamoDB 테이블 (해시키 `id`, GSI `user-index`, TTL `expire_at`) 은 Cloud
 - [ ] 긴 응답이 여러 청크로 쪼개져 스레드에 전송됨
 - [ ] 이미지 생성 요청 (`"고양이 그려줘"`) 이 업로드됨
 - [ ] 이미지 첨부 요약 (`read_attached_images`) 동작
+- [ ] PDF/텍스트 첨부 요약 (`read_attached_document`) 이 페이지·문자 상한 안에서 동작 (암호화 PDF 는 오류 반환)
 - [ ] `ALLOWED_CHANNEL_IDS` 외 채널에서 차단 메시지 표시
 - [ ] Slack retry 중복 호출이 dedup 로 무시됨 (CloudWatch 로그에 `dedup.skip` 확인)
 - [ ] 툴 실행 중 타이핑 인디케이터 (`assistant_threads_setStatus`) 만 뜨고 placeholder 메시지는 아직 올라오지 않음 (회신 데이터가 없을 때)
