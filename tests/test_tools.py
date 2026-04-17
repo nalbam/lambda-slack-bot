@@ -640,3 +640,94 @@ def test_read_attached_document_size_cap_via_streamed_read():
         out = read_attached_document(ctx, limit=1)
     assert "error" in out[0]
     assert "MAX_DOC_BYTES" in out[0]["error"]
+
+
+def test_read_attached_document_rejects_non_slack_host():
+    from src.tools import read_attached_document
+
+    ctx = _ctx()
+    out = read_attached_document(
+        ctx, urls=["https://evil.example.com/foo.pdf"], limit=1
+    )
+    assert len(out) == 1
+    assert "error" in out[0]
+    assert "invalid" in out[0]["error"].lower()
+
+
+def test_read_attached_document_skips_encrypted_pdf():
+    from src.tools import read_attached_document
+    from io import BytesIO
+    from pypdf import PdfWriter
+
+    writer = PdfWriter()
+    writer.add_blank_page(width=612, height=792)
+    # NOTE: pypdf>=4.0 uses keyword-only user_password. If requirements.txt's
+    # upper pin is ever relaxed past 6.0, verify this signature still holds.
+    writer.encrypt(user_password="secret")
+    buf = BytesIO()
+    writer.write(buf)
+    encrypted_pdf = buf.getvalue()
+
+    event = {
+        "files": [
+            {
+                "mimetype": "application/pdf",
+                "url_private_download": "https://files.slack.com/enc.pdf",
+                "name": "enc.pdf",
+            }
+        ]
+    }
+    ctx = _ctx(event=event)
+    with patch("src.tools.urllib.request.urlopen") as opener:
+        _mock_pdf_response(opener, encrypted_pdf)
+        out = read_attached_document(ctx, limit=1)
+    assert "error" in out[0]
+    assert "encrypted" in out[0]["error"]
+
+
+def test_read_attached_document_skips_image_mime():
+    from src.tools import read_attached_document
+
+    event = {
+        "files": [
+            {
+                "mimetype": "image/png",
+                "url_private_download": "https://files.slack.com/a.png",
+                "name": "a.png",
+            }
+        ]
+    }
+    ctx = _ctx(event=event)
+    # urlopen should NOT be called — image MIMEs are filtered before fetch
+    with patch("src.tools.urllib.request.urlopen") as opener:
+        out = read_attached_document(ctx, limit=1)
+    opener.assert_not_called()
+    assert out == []
+
+
+def test_read_attached_document_http_error_returns_per_item():
+    from src.tools import read_attached_document
+    import urllib.error
+
+    event = {
+        "files": [
+            {
+                "mimetype": "application/pdf",
+                "url_private_download": "https://files.slack.com/missing.pdf",
+                "name": "missing.pdf",
+            }
+        ]
+    }
+    ctx = _ctx(event=event)
+    with patch("src.tools.urllib.request.urlopen") as opener:
+        opener.side_effect = urllib.error.HTTPError(
+            url="https://files.slack.com/missing.pdf",
+            code=404,
+            msg="Not Found",
+            hdrs=None,
+            fp=None,
+        )
+        out = read_attached_document(ctx, limit=1)
+    assert len(out) == 1
+    assert "error" in out[0]
+    assert "404" in out[0]["error"]
