@@ -1,6 +1,6 @@
 # lambda-slack-bot
 
-Slack 멘션·DM 을 AWS Lambda 에서 처리하고, OpenAI 또는 AWS Bedrock LLM 으로 네이티브 **function calling** 기반 툴 오케스트레이션을 수행하는 봇입니다. `lambda-gurumi-ai-bot`·`lambda-slack-ai-bot` 의 대체를 목표로 합니다.
+Slack 멘션·DM 을 AWS Lambda 에서 처리하고, OpenAI 또는 AWS Bedrock LLM 으로 네이티브 **function calling** 기반 툴 오케스트레이션을 수행하는 봇입니다.
 
 ## 봇의 처리 흐름 (절대 생략하지 않는다)
 
