@@ -102,7 +102,8 @@ aws iam attach-role-policy --role-name "${NAME}" --policy-arn "arn:aws:iam::${AC
 
 ```bash
 # 로컬 배포 (선택)
-npm i -g serverless@3 && npm i serverless-python-requirements serverless-dotenv-plugin
+npm i -g serverless@3 && npm i serverless-python-requirements
+# Secrets + Variables 를 현재 셸에 export 한 뒤
 serverless deploy --stage dev --region us-east-1
 ```
 
