@@ -1,0 +1,71 @@
+name: deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+  repository_dispatch: {}
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  test-and-deploy:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install Python deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install -r requirements-dev.txt
+
+      - name: Run tests
+        run: pytest --cov=src --cov-report=term-missing
+
+      - name: Install Serverless + plugins
+        run: |
+          npm install -g serverless@3
+          npm install serverless-python-requirements serverless-dotenv-plugin
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/lambda-slack-bot
+          aws-region: us-east-1
+
+      - name: Generate .env for deploy
+        run: |
+          cat > .env <<EOF
+          SLACK_BOT_TOKEN=${{ secrets.SLACK_BOT_TOKEN }}
+          SLACK_SIGNING_SECRET=${{ secrets.SLACK_SIGNING_SECRET }}
+          OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY }}
+          TAVILY_API_KEY=${{ secrets.TAVILY_API_KEY }}
+          LLM_PROVIDER=${{ vars.LLM_PROVIDER }}
+          LLM_MODEL=${{ vars.LLM_MODEL }}
+          IMAGE_PROVIDER=${{ vars.IMAGE_PROVIDER }}
+          IMAGE_MODEL=${{ vars.IMAGE_MODEL }}
+          RESPONSE_LANGUAGE=${{ vars.RESPONSE_LANGUAGE }}
+          AGENT_MAX_STEPS=${{ vars.AGENT_MAX_STEPS }}
+          MAX_LEN_SLACK=${{ vars.MAX_LEN_SLACK }}
+          MAX_THROTTLE_COUNT=${{ vars.MAX_THROTTLE_COUNT }}
+          MAX_HISTORY_CHARS=${{ vars.MAX_HISTORY_CHARS }}
+          BOT_CURSOR=${{ vars.BOT_CURSOR }}
+          ALLOWED_CHANNEL_IDS=${{ vars.ALLOWED_CHANNEL_IDS }}
+          ALLOWED_CHANNEL_MESSAGE=${{ vars.ALLOWED_CHANNEL_MESSAGE }}
+          SYSTEM_MESSAGE=${{ vars.SYSTEM_MESSAGE }}
+          LOG_LEVEL=${{ vars.LOG_LEVEL }}
+          EOF
+
+      - name: Deploy
+        run: npx serverless deploy --stage dev --region us-east-1

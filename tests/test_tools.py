@@ -1,0 +1,258 @@
+import json
+from unittest.mock import MagicMock, patch
+
+import pytest
+
+from src.config import Settings
+from src.llm import ToolCall
+from src.tools import (
+    ToolContext,
+    ToolExecutor,
+    ToolRegistry,
+    default_registry,
+    fetch_thread_history,
+    generate_image,
+    read_attached_images,
+    search_slack_messages,
+    search_web,
+)
+
+
+def _settings(**overrides) -> Settings:
+    base = {
+        "slack_bot_token": "xoxb-test",
+        "slack_signing_secret": "sig",
+        "llm_provider": "openai",
+        "llm_model": "gpt-4o-mini",
+        "image_provider": "openai",
+        "image_model": "gpt-image-1",
+        "agent_max_steps": 3,
+        "response_language": "ko",
+        "dynamodb_table_name": "t",
+        "aws_region": "us-east-1",
+    }
+    base.update(overrides)
+    return Settings(**base)
+
+
+def _ctx(event=None, slack_client=None, llm=None):
+    return ToolContext(
+        slack_client=slack_client or MagicMock(),
+        channel="C1",
+        thread_ts="ts1",
+        event=event or {},
+        settings=_settings(),
+        llm=llm or MagicMock(),
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Registry
+# --------------------------------------------------------------------------- #
+
+
+def test_default_registry_has_expected_tools():
+    names = set(default_registry.names())
+    assert {"read_attached_images", "fetch_thread_history", "search_slack_messages", "search_web", "generate_image"}.issubset(names)
+
+
+def test_registry_specs_match_llm_shape():
+    for spec in default_registry.specs():
+        assert set(spec.keys()) == {"name", "description", "parameters"}
+        assert spec["parameters"]["type"] == "object"
+
+
+# --------------------------------------------------------------------------- #
+# Executor
+# --------------------------------------------------------------------------- #
+
+
+def test_executor_unknown_tool():
+    registry = ToolRegistry()
+    executor = ToolExecutor(_ctx(), registry)
+    result = executor.execute(ToolCall(id="1", name="nope", arguments={}))
+    assert result["ok"] is False
+    assert "unknown tool" in result["error"]
+
+
+def test_executor_timeout_guards_slow_tools():
+    import time
+
+    registry = ToolRegistry()
+
+    def slow(ctx):
+        time.sleep(1.0)
+
+    from src.tools import ToolDef
+
+    registry.register(ToolDef(name="slow", description="", parameters={"type": "object", "properties": {}}, fn=slow))
+    executor = ToolExecutor(_ctx(), registry, timeout=0.1)
+    result = executor.execute(ToolCall(id="1", name="slow", arguments={}))
+    assert result["ok"] is False
+    assert "timed out" in result["error"]
+
+
+def test_executor_captures_tool_error():
+    registry = ToolRegistry()
+
+    def boom(ctx):
+        raise ValueError("nope")
+
+    from src.tools import ToolDef
+
+    registry.register(ToolDef(name="boom", description="", parameters={"type": "object", "properties": {}}, fn=boom))
+    executor = ToolExecutor(_ctx(), registry)
+    result = executor.execute(ToolCall(id="1", name="boom", arguments={}))
+    assert result["ok"] is False
+    assert "nope" in result["error"]
+
+
+def test_executor_per_tool_timeout_override():
+    """A tool registered with its own timeout overrides the executor default."""
+    import time
+
+    registry = ToolRegistry()
+
+    def moderately_slow(ctx):
+        time.sleep(0.3)
+        return "done"
+
+    from src.tools import ToolDef
+
+    registry.register(
+        ToolDef(
+            name="slowish",
+            description="",
+            parameters={"type": "object", "properties": {}},
+            fn=moderately_slow,
+            timeout=1.0,
+        )
+    )
+    # Default timeout short enough to kill a naïve tool; per-tool override lets
+    # this one finish.
+    executor = ToolExecutor(_ctx(), registry, timeout=0.1)
+    result = executor.execute(ToolCall(id="1", name="slowish", arguments={}))
+    assert result["ok"] is True
+    assert result["result"] == "done"
+
+
+def test_generate_image_tool_has_extended_timeout():
+    """Image generation is slow; its registered timeout must be > default."""
+    td = default_registry.get("generate_image")
+    assert td is not None
+    assert td.timeout is not None
+    assert td.timeout >= 60.0
+
+
+# --------------------------------------------------------------------------- #
+# read_attached_images SSRF guard
+# --------------------------------------------------------------------------- #
+
+
+def test_read_attached_images_rejects_non_slack_host():
+    event = {"files": [{"mimetype": "image/png", "url_private_download": "https://evil.example.com/x.png"}]}
+    with pytest.raises(ValueError):
+        read_attached_images(_ctx(event=event), limit=1)
+
+
+def test_read_attached_images_rejects_http_scheme():
+    event = {"files": [{"mimetype": "image/png", "url_private_download": "http://files.slack.com/x.png"}]}
+    with pytest.raises(ValueError):
+        read_attached_images(_ctx(event=event), limit=1)
+
+
+def test_read_attached_images_accepts_slack_host_variants():
+    event = {
+        "files": [
+            {"mimetype": "image/png", "url_private_download": "https://files-pri.slack.com/x.png", "name": "a"},
+        ]
+    }
+    llm = MagicMock()
+    llm.describe_image.return_value = "a cat"
+    ctx = _ctx(event=event, llm=llm)
+    with patch("src.tools.urllib.request.urlopen") as opener:
+        opener.return_value.__enter__.return_value.read.return_value = b"fake"
+        result = read_attached_images(ctx, limit=1)
+    assert result == [{"name": "a", "summary": "a cat"}]
+
+
+def test_read_attached_images_skips_non_image_mimetypes():
+    event = {"files": [{"mimetype": "application/pdf", "url_private_download": "https://files.slack.com/x.pdf"}]}
+    assert read_attached_images(_ctx(event=event), limit=1) == []
+
+
+# --------------------------------------------------------------------------- #
+# fetch_thread_history
+# --------------------------------------------------------------------------- #
+
+
+def test_fetch_thread_history_shapes_output():
+    client = MagicMock()
+    client.conversations_replies.return_value = {"messages": [{"user": "U1", "text": "hi"}]}
+    out = fetch_thread_history(_ctx(slack_client=client), limit=5)
+    assert out == [{"user": "U1", "text": "hi"}]
+
+
+# --------------------------------------------------------------------------- #
+# search_slack_messages
+# --------------------------------------------------------------------------- #
+
+
+def test_search_slack_messages_shapes_output():
+    client = MagicMock()
+    client.search_messages.return_value = {
+        "messages": {"matches": [{"channel": {"name": "general"}, "text": "hi"}]}
+    }
+    out = search_slack_messages(_ctx(slack_client=client), query="hi", limit=1)
+    assert out == [{"channel": "general", "text": "hi"}]
+
+
+# --------------------------------------------------------------------------- #
+# search_web
+# --------------------------------------------------------------------------- #
+
+
+def test_search_web_ddg_parses_results():
+    ctx = _ctx()
+    payload = {
+        "AbstractURL": "https://example.com/a",
+        "AbstractText": "abstract",
+        "RelatedTopics": [{"Text": "t1", "FirstURL": "https://example.com/1"}],
+    }
+    with patch("src.tools.urllib.request.urlopen") as opener:
+        opener.return_value.__enter__.return_value.read.return_value = json.dumps(payload).encode()
+        results = search_web(ctx, query="q", limit=5)
+    assert results[0]["url"] == "https://example.com/a"
+    assert results[1]["url"] == "https://example.com/1"
+
+
+def test_search_web_uses_tavily_when_key_set():
+    ctx = ToolContext(
+        slack_client=MagicMock(),
+        channel="C1",
+        thread_ts="ts1",
+        event={},
+        settings=_settings(tavily_api_key="tvly-xyz"),
+        llm=MagicMock(),
+    )
+    payload = {"results": [{"title": "t", "url": "https://x", "content": "c"}]}
+    with patch("src.tools.urllib.request.urlopen") as opener:
+        opener.return_value.__enter__.return_value.read.return_value = json.dumps(payload).encode()
+        out = search_web(ctx, query="q", limit=5)
+    assert out == [{"title": "t", "url": "https://x", "content": "c"}]
+
+
+# --------------------------------------------------------------------------- #
+# generate_image
+# --------------------------------------------------------------------------- #
+
+
+def test_generate_image_returns_permalink():
+    llm = MagicMock()
+    llm.generate_image.return_value = b"imgbytes"
+    client = MagicMock()
+    client.files_upload_v2.return_value = {"file": {"permalink": "https://slack/abc", "title": "t"}}
+    ctx = _ctx(slack_client=client, llm=llm)
+    out = generate_image(ctx, prompt="cat")
+    assert out == {"permalink": "https://slack/abc", "title": "t"}
+    llm.generate_image.assert_called_once_with("cat")

@@ -1,0 +1,107 @@
+service: lambda-slack-bot
+frameworkVersion: "3"
+
+provider:
+  name: aws
+  runtime: python3.12
+  architecture: arm64
+  region: ${env:AWS_REGION, 'us-east-1'}
+  stage: ${opt:stage, 'dev'}
+  memorySize: 5120
+  timeout: 90
+  environment:
+    DYNAMODB_TABLE_NAME: ${self:service}-${sls:stage}
+    AWS_REGION_NAME: ${self:provider.region}
+    LLM_PROVIDER: ${env:LLM_PROVIDER, 'openai'}
+    LLM_MODEL: ${env:LLM_MODEL, 'gpt-4o-mini'}
+    IMAGE_PROVIDER: ${env:IMAGE_PROVIDER, 'openai'}
+    IMAGE_MODEL: ${env:IMAGE_MODEL, 'gpt-image-1'}
+    RESPONSE_LANGUAGE: ${env:RESPONSE_LANGUAGE, 'ko'}
+    AGENT_MAX_STEPS: ${env:AGENT_MAX_STEPS, '3'}
+    MAX_LEN_SLACK: ${env:MAX_LEN_SLACK, '3000'}
+    MAX_THROTTLE_COUNT: ${env:MAX_THROTTLE_COUNT, '100'}
+    MAX_HISTORY_CHARS: ${env:MAX_HISTORY_CHARS, '4000'}
+    BOT_CURSOR: ${env:BOT_CURSOR, ':robot_face:'}
+    ALLOWED_CHANNEL_IDS: ${env:ALLOWED_CHANNEL_IDS, ''}
+    ALLOWED_CHANNEL_MESSAGE: ${env:ALLOWED_CHANNEL_MESSAGE, ''}
+    SYSTEM_MESSAGE: ${env:SYSTEM_MESSAGE, ''}
+    LOG_LEVEL: ${env:LOG_LEVEL, 'INFO'}
+    SLACK_BOT_TOKEN: ${env:SLACK_BOT_TOKEN}
+    SLACK_SIGNING_SECRET: ${env:SLACK_SIGNING_SECRET}
+    OPENAI_API_KEY: ${env:OPENAI_API_KEY, ''}
+    TAVILY_API_KEY: ${env:TAVILY_API_KEY, ''}
+  iam:
+    role:
+      statements:
+        - Effect: Allow
+          Action:
+            - dynamodb:GetItem
+            - dynamodb:PutItem
+            - dynamodb:Query
+          Resource:
+            - !GetAtt ConversationTable.Arn
+            - !Join ["", [!GetAtt ConversationTable.Arn, "/index/user-index"]]
+        - Effect: Allow
+          Action:
+            - bedrock:InvokeModel
+            - bedrock:InvokeModelWithResponseStream
+            - bedrock:Converse
+            - bedrock:ConverseStream
+          Resource: "*"
+
+plugins:
+  - serverless-python-requirements
+  - serverless-dotenv-plugin
+
+custom:
+  pythonRequirements:
+    slim: true
+    layer: false
+    noDeploy:
+      - pytest
+      - pytest-cov
+      - moto
+      - responses
+
+functions:
+  mention:
+    handler: app.lambda_handler
+    events:
+      - http:
+          path: slack/events
+          method: post
+
+resources:
+  Resources:
+    ConversationTable:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        TableName: ${self:service}-${sls:stage}
+        AttributeDefinitions:
+          - AttributeName: id
+            AttributeType: S
+          - AttributeName: user
+            AttributeType: S
+          - AttributeName: expire_at
+            AttributeType: N
+        KeySchema:
+          - AttributeName: id
+            KeyType: HASH
+        GlobalSecondaryIndexes:
+          - IndexName: user-index
+            KeySchema:
+              - AttributeName: user
+                KeyType: HASH
+              - AttributeName: expire_at
+                KeyType: RANGE
+            Projection:
+              ProjectionType: KEYS_ONLY
+            ProvisionedThroughput:
+              ReadCapacityUnits: 5
+              WriteCapacityUnits: 5
+        TimeToLiveSpecification:
+          AttributeName: expire_at
+          Enabled: true
+        ProvisionedThroughput:
+          ReadCapacityUnits: 5
+          WriteCapacityUnits: 5
