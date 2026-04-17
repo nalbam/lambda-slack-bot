@@ -34,9 +34,7 @@ from src.slack_helpers import (
 )
 
 
-def _split_for_slack(text: str, max_len: int) -> list[str]:
-    return MessageFormatter.split_message(text, max_len=max_len)
-from src.tools import ToolContext, ToolExecutor, default_registry
+from src.tools import ToolContext, default_registry
 
 settings = Settings.from_env()
 logger = get_logger("app")
@@ -241,10 +239,10 @@ def _process(event: dict, client, say, is_dm: bool) -> None:  # noqa: ANN001
         return
 
     final_text = result.text or "(응답을 생성하지 못했습니다)"
-    # If the final text fits into one Slack message, finalize the stream with it.
-    # Otherwise, close the stream with the first chunk and post remaining chunks
-    # as new thread messages (send_long_message pattern).
-    chunks = _split_for_slack(final_text, settings.max_len_slack)
+    # Split the answer by Slack's per-message limit. StreamingMessage.stop()
+    # now handles split internally, but keep the fallback here in case a
+    # very long final arrives after the stream was never started.
+    chunks = MessageFormatter.split_message(final_text, max_len=settings.max_len_slack)
     stream_msg.stop(chunks[0])
     for extra in chunks[1:]:
         client.chat_postMessage(channel=channel, thread_ts=thread_ts, text=extra)

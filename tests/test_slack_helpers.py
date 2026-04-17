@@ -8,7 +8,6 @@ from src.slack_helpers import (
     UserNameCache,
     channel_allowed,
     sanitize_error,
-    send_long_message,
 )
 
 
@@ -55,49 +54,6 @@ def test_split_code_block_longer_than_max_len_still_respects_limit():
 
 def test_split_empty_string():
     assert MessageFormatter.split_message("", max_len=100) == [""]
-
-
-def test_send_long_message_first_chunk_uses_chat_update():
-    client = MagicMock()
-    send_long_message(
-        client=client,
-        channel="C1",
-        thread_ts="ts1",
-        text="short",
-        first_ts="ts0",
-        max_len=1000,
-    )
-    client.chat_update.assert_called_once_with(channel="C1", ts="ts0", text="short")
-    client.chat_postMessage.assert_not_called()
-
-
-def test_send_long_message_multi_chunk():
-    client = MagicMock()
-    text = "A" * 1200 + "\n\n" + "B" * 1200
-    send_long_message(
-        client=client,
-        channel="C1",
-        thread_ts="ts1",
-        text=text,
-        first_ts="ts0",
-        max_len=1500,
-    )
-    assert client.chat_update.call_count == 1
-    assert client.chat_postMessage.call_count >= 1
-
-
-def test_send_long_message_falls_back_when_chat_update_fails():
-    client = MagicMock()
-    client.chat_update.side_effect = SlackApiError("fail", {"error": "msg_too_long"})
-    send_long_message(
-        client=client,
-        channel="C1",
-        thread_ts="ts1",
-        text="hi",
-        first_ts="ts0",
-        max_len=1000,
-    )
-    client.chat_postMessage.assert_called_once()
 
 
 def test_user_name_cache_uses_display_name():

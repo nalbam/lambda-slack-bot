@@ -157,19 +157,6 @@ class SlackMentionAgent:
         args_blob = json.dumps(call.arguments or {}, sort_keys=True, ensure_ascii=False)
         return f"{call.name}:{hashlib.sha1(args_blob.encode()).hexdigest()[:12]}"
 
-    def _compose_final(self, system: str, messages: list[dict[str, Any]], fallback: str) -> str:
-        """Emit the final answer, preferring streaming when a stream callback exists.
-
-        When `on_stream` is set we re-ask the LLM with `tools=None` and stream
-        deltas so the caller can surface them live. This costs one extra LLM
-        call but keeps the streaming path universal (OpenAI + Bedrock). When
-        no streaming is requested, we use the `fallback` content we already
-        have from the previous hop — no extra call.
-        """
-        if self.on_stream:
-            return self.llm.stream_chat(system, messages, on_delta=self.on_stream)
-        return fallback or ""
-
     def _compose_without_tools(self, system: str, messages: list[dict[str, Any]]) -> str:
         """Force a final answer when max_steps is reached — no tools permitted."""
         directive = (

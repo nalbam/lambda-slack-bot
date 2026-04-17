@@ -5,7 +5,7 @@ import logging
 import re
 import time
 from dataclasses import dataclass
-from typing import Any, Callable, Iterable
+from typing import Any, Iterable
 
 from slack_sdk.errors import SlackApiError
 
@@ -28,7 +28,7 @@ class MessageFormatter:
     """
 
     @staticmethod
-    def split_message(text: str, max_len: int = 3000) -> list[str]:
+    def split_message(text: str, max_len: int = 2000) -> list[str]:
         if not text:
             return [""]
         if len(text) <= max_len:
@@ -92,30 +92,6 @@ class MessageFormatter:
         if buf:
             out.append(buf)
         return out or [""]
-
-
-def send_long_message(
-    *,
-    client: Any,
-    channel: str,
-    thread_ts: str,
-    text: str,
-    first_ts: str | None = None,
-    max_len: int = 3000,
-    interval: float = 0.0,
-) -> None:
-    """Send a possibly-long message to Slack, updating the placeholder first if provided."""
-    chunks = MessageFormatter.split_message(text, max_len=max_len)
-    for idx, chunk in enumerate(chunks):
-        if idx == 0 and first_ts:
-            try:
-                client.chat_update(channel=channel, ts=first_ts, text=chunk)
-                continue
-            except SlackApiError as exc:
-                logger.warning("chat_update failed, falling back to postMessage: %s", exc)
-        client.chat_postMessage(channel=channel, thread_ts=thread_ts, text=chunk)
-        if interval > 0 and idx < len(chunks) - 1:
-            time.sleep(interval)
 
 
 def set_thread_status(client: Any, channel: str, thread_ts: str, status: str) -> None:
@@ -370,15 +346,3 @@ def sanitize_error(exc: BaseException) -> str:
     return msg
 
 
-def throttled(fn: Callable[[str], None], min_interval: float) -> Callable[[str], None]:
-    """Wrap a callback so it fires at most once per min_interval seconds."""
-    state = {"last": 0.0, "buf": ""}
-
-    def emit(delta: str) -> None:
-        state["buf"] += delta
-        now = time.monotonic()
-        if now - state["last"] >= min_interval:
-            fn(state["buf"])
-            state["last"] = now
-
-    return emit
