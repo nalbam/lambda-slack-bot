@@ -27,6 +27,8 @@ Slack 멘션·DM 을 AWS Lambda 에서 처리하고, OpenAI · AWS Bedrock · xA
   - `fetch_thread_history` — 스레드 히스토리 조회
   - `search_web` — Tavily (TAVILY_API_KEY 설정 시) 또는 DuckDuckGo
   - `generate_image` — 이미지 생성 후 Slack 업로드
+  - `get_current_time` — 서버 기본 TZ(또는 `timezone` 인자) 로 현재 시각/요일 반환
+  - `read_attached_document` — 첨부 PDF/텍스트 파일 추출 (페이지·바이트·문자 상한 적용)
 - **Production 기반**
   - DynamoDB 조건부 put 으로 Slack 재시도 **중복 제거**
   - 채널 allowlist · 유저당 동시 요청 **throttle**
@@ -59,6 +61,10 @@ Slack 멘션·DM 을 AWS Lambda 에서 처리하고, OpenAI · AWS Bedrock · xA
 | `MAX_OUTPUT_TOKENS` | | `4096` | LLM hop 당 출력 토큰 상한 (≥256) |
 | `MAX_THROTTLE_COUNT` | | `100` | 유저별 동시 요청 상한 |
 | `MAX_HISTORY_CHARS` | | `4000` | 저장되는 대화 직렬화 최대 길이 |
+| `DEFAULT_TIMEZONE` | | `Asia/Seoul` | `get_current_time` 기본 TZ (IANA). 잘못된 이름이면 기본값으로 폴백 + 경고 |
+| `MAX_DOC_CHARS` | | `20000` | `read_attached_document` 추출 텍스트 최대 문자수 (≥1000) |
+| `MAX_DOC_PAGES` | | `50` | `read_attached_document` PDF 최대 페이지수 (≥1) |
+| `MAX_DOC_BYTES` | | `26214400` | `read_attached_document` 다운로드 최대 바이트 (기본 25MB, ≥65536) |
 | `BOT_CURSOR` | | `:robot_face:` | 플레이스홀더·스트림 인디케이터 이모지 |
 | `SYSTEM_MESSAGE` | | — | 시스템 프롬프트 오버라이드 |
 | `LOG_LEVEL` | | `INFO` | 로그 레벨 |
