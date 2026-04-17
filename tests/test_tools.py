@@ -570,3 +570,73 @@ def test_read_attached_document_page_cap():
         out = read_attached_document(ctx, limit=1)
     assert "error" in out[0]
     assert "MAX_DOC_PAGES" in out[0]["error"]
+
+
+def test_read_attached_document_size_cap_via_content_length():
+    from src.tools import read_attached_document
+
+    event = {
+        "files": [
+            {
+                "mimetype": "text/plain",
+                "url_private_download": "https://files.slack.com/huge.txt",
+                "name": "huge.txt",
+            }
+        ]
+    }
+    ctx = ToolContext(
+        slack_client=MagicMock(),
+        channel="C1",
+        thread_ts="ts1",
+        event=event,
+        settings=_settings(max_doc_bytes=100),  # tiny cap
+        llm=MagicMock(),
+    )
+    with patch("src.tools.urllib.request.urlopen") as opener:
+        resp = opener.return_value.__enter__.return_value
+        resp.headers = {"Content-Length": "200"}  # > cap
+        resp.read.return_value = b"x" * 10  # should never be read past cap
+        out = read_attached_document(ctx, limit=1)
+    assert "error" in out[0]
+    assert "MAX_DOC_BYTES" in out[0]["error"]
+
+
+def test_read_attached_document_size_cap_via_streamed_read():
+    from src.tools import read_attached_document
+
+    event = {
+        "files": [
+            {
+                "mimetype": "text/plain",
+                "url_private_download": "https://files.slack.com/nohead.txt",
+                "name": "nohead.txt",
+            }
+        ]
+    }
+    ctx = ToolContext(
+        slack_client=MagicMock(),
+        channel="C1",
+        thread_ts="ts1",
+        event=event,
+        settings=_settings(max_doc_bytes=100),
+        llm=MagicMock(),
+    )
+    body = b"y" * 200
+    with patch("src.tools.urllib.request.urlopen") as opener:
+        resp = opener.return_value.__enter__.return_value
+        resp.headers = {}  # no Content-Length
+        buf = {"pos": 0}
+
+        def _chunked(n=-1):
+            if n == -1:
+                remaining = body[buf["pos"]:]
+                buf["pos"] = len(body)
+                return remaining
+            chunk = body[buf["pos"]:buf["pos"] + n]
+            buf["pos"] += len(chunk)
+            return chunk
+
+        resp.read.side_effect = _chunked
+        out = read_attached_document(ctx, limit=1)
+    assert "error" in out[0]
+    assert "MAX_DOC_BYTES" in out[0]["error"]
