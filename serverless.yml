@@ -57,6 +57,13 @@ custom:
   pythonRequirements:
     slim: true
     layer: false
+    # Force arm64 wheels so native extensions (pydantic_core, etc.) match
+    # the Lambda runtime even when pip runs on an x86_64 GitHub runner.
+    pipCmdExtraArgs:
+      - --platform=manylinux2014_aarch64
+      - --only-binary=:all:
+      - --python-version=3.12
+      - --implementation=cp
     noDeploy:
       - pytest
       - pytest-cov
