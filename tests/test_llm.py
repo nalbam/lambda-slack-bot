@@ -1,7 +1,7 @@
 import json
 from unittest.mock import MagicMock, patch
 
-from src.llm import BedrockProvider, OpenAIProvider, ToolCall
+from src.llm import BedrockProvider, OpenAIProvider, ToolCall, XAIProvider, get_llm
 
 
 # --------------------------------------------------------------------------- #
@@ -522,3 +522,127 @@ def test_composite_provider_routes_image_to_image_llm():
     text.chat.assert_called_once()
     composite.generate_image("x")
     image.generate_image.assert_called_once_with("x")
+
+
+# --------------------------------------------------------------------------- #
+# xAI (Grok)
+# --------------------------------------------------------------------------- #
+
+
+def test_xai_provider_uses_xai_base_url_and_api_key():
+    """XAIProvider must instantiate OpenAI client with the xAI base URL and
+    the explicit api_key, so traffic goes to api.x.ai rather than OpenAI."""
+    provider = XAIProvider(
+        model="grok-4-1-fast-reasoning",
+        image_model="grok-imagine-image",
+        api_key="xai-test",
+    )
+    with patch("openai.OpenAI") as openai_ctor:
+        openai_ctor.return_value = MagicMock()
+        provider._get_client()
+    kwargs = openai_ctor.call_args.kwargs
+    assert kwargs.get("base_url") == "https://api.x.ai/v1"
+    assert kwargs.get("api_key") == "xai-test"
+
+
+def test_xai_chat_parses_tool_calls():
+    """Grok returns the same wire shape as OpenAI for tool calls; the
+    shared parser must turn them into ToolCall objects."""
+    provider = XAIProvider(model="grok-4-1-fast-reasoning", image_model="grok-imagine-image", api_key="x")
+    provider._client = MagicMock()
+    tc = _openai_tool_call("call_g1", "search_web", {"query": "xai"})
+    provider._client.chat.completions.create.return_value = _openai_completion(
+        tool_calls=[tc], finish="tool_calls"
+    )
+    result = provider.chat(
+        system="s",
+        messages=[],
+        tools=[{"name": "search_web", "description": "", "parameters": {"type": "object"}}],
+    )
+    assert result.stop_reason == "tool_use"
+    assert result.tool_calls[0].name == "search_web"
+    assert result.tool_calls[0].arguments == {"query": "xai"}
+
+
+def test_xai_chat_uses_legacy_max_tokens_always():
+    """All current grok chat models accept max_tokens + temperature;
+    XAIProvider must not switch to max_completion_tokens (OpenAI-only split)."""
+    provider = XAIProvider(model="grok-4.20-0309-reasoning", image_model="grok-imagine-image", api_key="x")
+    provider._client = MagicMock()
+    provider._client.chat.completions.create.return_value = _openai_completion(content="hi")
+    provider.chat(system="s", messages=[])
+    kwargs = provider._client.chat.completions.create.call_args.kwargs
+    assert "max_tokens" in kwargs
+    assert "temperature" in kwargs
+    assert "max_completion_tokens" not in kwargs
+
+
+def test_xai_generate_image_skips_size_and_requests_b64():
+    """xAI images.generate rejects `size` (uses aspect_ratio/resolution).
+    We must omit it and explicitly ask for b64_json so we can decode bytes
+    into files_upload_v2."""
+    import base64 as _b64
+
+    provider = XAIProvider(model="grok-4-1-fast-reasoning", image_model="grok-imagine-image", api_key="x")
+    provider._client = MagicMock()
+    response = MagicMock()
+    response.data = [MagicMock(b64_json=_b64.b64encode(b"xai-bytes").decode())]
+    provider._client.images.generate.return_value = response
+
+    assert provider.generate_image("a cat") == b"xai-bytes"
+    kwargs = provider._client.images.generate.call_args.kwargs
+    assert kwargs["model"] == "grok-imagine-image"
+    assert kwargs["prompt"] == "a cat"
+    assert kwargs["response_format"] == "b64_json"
+    assert "size" not in kwargs  # xAI rejects this
+
+
+def test_xai_stream_chat_emits_deltas():
+    provider = XAIProvider(model="grok-4-1-fast-reasoning", image_model="grok-imagine-image", api_key="x")
+    provider._client = MagicMock()
+
+    def _chunk(text):
+        ch = MagicMock()
+        ch.choices[0].delta.content = text
+        return ch
+
+    provider._client.chat.completions.create.return_value = iter([_chunk("gr"), _chunk("ok")])
+    seen: list[str] = []
+    result = provider.stream_chat(system="s", messages=[], on_delta=seen.append)
+    assert result == "grok"
+    assert seen == ["gr", "ok"]
+
+
+# --------------------------------------------------------------------------- #
+# Factory
+# --------------------------------------------------------------------------- #
+
+
+def test_get_llm_builds_xai_provider():
+    provider = get_llm(
+        provider="xai",
+        model="grok-4-1-fast-reasoning",
+        image_provider="xai",
+        image_model="grok-imagine-image",
+        region="us-east-1",
+        api_keys={"xai": "xai-secret"},
+    )
+    assert isinstance(provider, XAIProvider)
+    assert provider._api_key == "xai-secret"
+
+
+def test_get_llm_composite_xai_text_openai_image():
+    """Mixed-provider setups still work through _CompositeProvider."""
+    from src.llm import _CompositeProvider
+
+    provider = get_llm(
+        provider="xai",
+        model="grok-4-1-fast-reasoning",
+        image_provider="openai",
+        image_model="gpt-image-1",
+        region="us-east-1",
+        api_keys={"xai": "xai-key"},
+    )
+    assert isinstance(provider, _CompositeProvider)
+    assert isinstance(provider.text, XAIProvider)
+    assert isinstance(provider.image, OpenAIProvider)

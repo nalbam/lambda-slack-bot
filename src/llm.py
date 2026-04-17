@@ -108,50 +108,196 @@ def _is_new_gen_openai(model: str) -> bool:
     return any(model.startswith(p) for p in _OPENAI_NEW_GENERATION_PREFIXES)
 
 
-class OpenAIProvider:
-    def __init__(self, model: str, image_model: str):
+# --------------------------------------------------------------------------- #
+# Module-level helpers shared between OpenAI-compatible providers (OpenAI, xAI)
+# --------------------------------------------------------------------------- #
+
+
+def _to_openai_wire_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Translate canonical messages (our agent's shape) to OpenAI's wire shape."""
+    out: list[dict[str, Any]] = []
+    for msg in messages:
+        if msg.get("role") == "assistant" and msg.get("tool_calls"):
+            out.append(
+                {
+                    "role": "assistant",
+                    "content": msg.get("content") or None,
+                    "tool_calls": [
+                        {
+                            "id": tc["id"],
+                            "type": "function",
+                            "function": {
+                                "name": tc["name"],
+                                "arguments": json.dumps(tc.get("arguments") or {}, ensure_ascii=False),
+                            },
+                        }
+                        for tc in msg["tool_calls"]
+                    ],
+                }
+            )
+        else:
+            out.append(msg)
+    return out
+
+
+def _build_openai_tools_payload(tools: list[ToolSpec]) -> list[dict[str, Any]]:
+    return [
+        {
+            "type": "function",
+            "function": {
+                "name": t["name"],
+                "description": t["description"],
+                "parameters": t["parameters"],
+            },
+        }
+        for t in tools
+    ]
+
+
+def _map_openai_finish_reason(finish: str | None) -> Literal["end_turn", "tool_use", "max_tokens", "other"]:
+    if finish == "tool_calls":
+        return "tool_use"
+    if finish == "length":
+        return "max_tokens"
+    if finish in {"stop", None}:
+        return "end_turn"
+    return "other"
+
+
+def _extract_openai_usage(usage_obj) -> dict[str, int]:
+    if not usage_obj:
+        return {}
+    return {
+        "input": getattr(usage_obj, "prompt_tokens", 0) or 0,
+        "output": getattr(usage_obj, "completion_tokens", 0) or 0,
+    }
+
+
+def _parse_openai_completion(completion) -> LLMResult:
+    choice = completion.choices[0]
+    msg = choice.message
+    tool_calls: list[ToolCall] = []
+    for call in (msg.tool_calls or []):
+        try:
+            args = json.loads(call.function.arguments or "{}")
+        except json.JSONDecodeError:
+            args = {}
+        tool_calls.append(ToolCall(id=call.id, name=call.function.name, arguments=args))
+
+    return LLMResult(
+        content=msg.content or "",
+        tool_calls=tool_calls,
+        stop_reason=_map_openai_finish_reason(choice.finish_reason),
+        token_usage=_extract_openai_usage(getattr(completion, "usage", None)),
+    )
+
+
+def _consume_openai_stream(stream, on_delta: Callable[[str], None]) -> LLMResult:
+    """Drain an OpenAI-compatible chat completion stream.
+
+    Stops forwarding content to `on_delta` once a tool_calls delta arrives —
+    any trailing commentary would otherwise leak into the final user reply.
+    tool_calls chunks are accumulated by index and returned as ToolCall list.
+    """
+    content_parts: list[str] = []
+    tool_calls_accum: dict[int, dict[str, Any]] = {}
+    saw_tool_calls = False
+    finish_reason: str | None = None
+    usage_obj = None
+
+    for chunk in stream:
+        usage_obj = getattr(chunk, "usage", None) or usage_obj
+        if not chunk.choices:
+            continue
+        choice = chunk.choices[0]
+        delta = choice.delta
+        if getattr(delta, "tool_calls", None):
+            saw_tool_calls = True
+            for tc in delta.tool_calls:
+                idx = tc.index
+                slot = tool_calls_accum.setdefault(idx, {"id": None, "name": "", "arguments": ""})
+                if getattr(tc, "id", None):
+                    slot["id"] = tc.id
+                fn = getattr(tc, "function", None)
+                if fn is not None:
+                    if getattr(fn, "name", None):
+                        slot["name"] += fn.name
+                    if getattr(fn, "arguments", None):
+                        slot["arguments"] += fn.arguments
+        if getattr(delta, "content", None):
+            content_parts.append(delta.content)
+            if not saw_tool_calls:
+                on_delta(delta.content)
+        if getattr(choice, "finish_reason", None):
+            finish_reason = choice.finish_reason
+
+    tool_calls: list[ToolCall] = []
+    for idx in sorted(tool_calls_accum):
+        slot = tool_calls_accum[idx]
+        try:
+            args = json.loads(slot["arguments"] or "{}")
+        except json.JSONDecodeError:
+            args = {}
+        tool_calls.append(ToolCall(id=slot["id"] or "", name=slot["name"], arguments=args))
+
+    return LLMResult(
+        content="".join(content_parts),
+        tool_calls=tool_calls,
+        stop_reason=_map_openai_finish_reason(finish_reason),
+        token_usage=_extract_openai_usage(usage_obj),
+    )
+
+
+class _OpenAICompatProvider:
+    """Shared machinery for any OpenAI-wire-compatible chat/vision/image API.
+
+    Subclasses set BASE_URL / API_KEY_ENV_VAR and override small hooks
+    (`_token_params`, `_image_generate_kwargs`). The heavy lifting —
+    payload assembly, streaming, tool_calls parsing — lives on this base
+    and on the module-level helpers above.
+    """
+
+    BASE_URL: str | None = None  # None = OpenAI default
+    API_KEY_ENV_VAR: str = "OPENAI_API_KEY"
+
+    def __init__(self, model: str, image_model: str, api_key: str | None = None):
         self.model = model
         self.image_model = image_model
+        self._api_key = api_key
         self._client = None
 
     def _get_client(self):
         if self._client is None:
             from openai import OpenAI
 
-            self._client = OpenAI()
+            kwargs: dict[str, Any] = {}
+            if self.BASE_URL:
+                kwargs["base_url"] = self.BASE_URL
+            if self._api_key:
+                kwargs["api_key"] = self._api_key
+            self._client = OpenAI(**kwargs)
         return self._client
 
+    # -- hooks -------------------------------------------------------------- #
+
     def _token_params(self, max_tokens: int) -> dict[str, Any]:
-        if _is_new_gen_openai(self.model):
-            return {"max_completion_tokens": max_tokens}
+        """Default: OpenAI legacy models use max_tokens+temperature."""
         return {"max_tokens": max_tokens, "temperature": 0.2}
 
-    @staticmethod
-    def _to_openai_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        """Translate canonical messages (our agent's shape) to OpenAI's wire shape."""
-        out: list[dict[str, Any]] = []
-        for msg in messages:
-            if msg.get("role") == "assistant" and msg.get("tool_calls"):
-                out.append(
-                    {
-                        "role": "assistant",
-                        "content": msg.get("content") or None,
-                        "tool_calls": [
-                            {
-                                "id": tc["id"],
-                                "type": "function",
-                                "function": {
-                                    "name": tc["name"],
-                                    "arguments": json.dumps(tc.get("arguments") or {}, ensure_ascii=False),
-                                },
-                            }
-                            for tc in msg["tool_calls"]
-                        ],
-                    }
-                )
-            else:
-                out.append(msg)
-        return out
+    def _image_generate_kwargs(self, prompt: str) -> dict[str, Any]:
+        """Default OpenAI (dall-e / gpt-image-1) image call kwargs."""
+        kwargs: dict[str, Any] = {
+            "model": self.image_model,
+            "prompt": prompt,
+            "size": "1024x1024",
+        }
+        # gpt-image-1 rejects `response_format` (b64 is the default); only legacy
+        # DALL-E models need the explicit flag.
+        if self.image_model.startswith("dall-e"):
+            kwargs["response_format"] = "b64_json"
+        return kwargs
+
+    # -- LLMProvider surface ----------------------------------------------- #
 
     def chat(
         self,
@@ -164,125 +310,20 @@ class OpenAIProvider:
         client = self._get_client()
         payload: dict[str, Any] = {
             "model": self.model,
-            "messages": [{"role": "system", "content": system}, *self._to_openai_messages(messages)],
+            "messages": [{"role": "system", "content": system}, *_to_openai_wire_messages(messages)],
             **self._token_params(max_tokens),
         }
         if tools:
-            payload["tools"] = [
-                {"type": "function", "function": {"name": t["name"], "description": t["description"], "parameters": t["parameters"]}}
-                for t in tools
-            ]
+            payload["tools"] = _build_openai_tools_payload(tools)
             payload["tool_choice"] = "auto"
 
         if on_delta is None:
-            return self._chat_blocking(client, payload)
-        return self._chat_streaming(client, payload, on_delta)
+            completion = client.chat.completions.create(**payload)
+            return _parse_openai_completion(completion)
 
-    def _chat_blocking(self, client, payload: dict[str, Any]) -> LLMResult:
-        completion = client.chat.completions.create(**payload)
-        choice = completion.choices[0]
-        msg = choice.message
-        tool_calls: list[ToolCall] = []
-        for call in (msg.tool_calls or []):
-            try:
-                args = json.loads(call.function.arguments or "{}")
-            except json.JSONDecodeError:
-                args = {}
-            tool_calls.append(ToolCall(id=call.id, name=call.function.name, arguments=args))
-
-        stop_reason = self._map_finish_reason(choice.finish_reason)
-        token_usage = self._extract_usage(completion)
-        return LLMResult(content=msg.content or "", tool_calls=tool_calls, stop_reason=stop_reason, token_usage=token_usage)
-
-    def _chat_streaming(self, client, payload: dict[str, Any], on_delta: Callable[[str], None]) -> LLMResult:
-        """Stream chunks and emit content deltas until we see the model start a tool call.
-
-        Once any tool_calls delta arrives, we stop forwarding content to
-        `on_delta` for this hop — content emitted at that point is typically
-        a preface to the tool call, and we don't want to mix it into the
-        user-visible answer. tool_calls are accumulated and returned.
-        """
         payload = {**payload, "stream": True, "stream_options": {"include_usage": True}}
         stream = client.chat.completions.create(**payload)
-
-        content_parts: list[str] = []
-        tool_calls_accum: dict[int, dict[str, Any]] = {}
-        saw_tool_calls = False
-        finish_reason: str | None = None
-        usage_obj = None
-
-        for chunk in stream:
-            usage_obj = getattr(chunk, "usage", None) or usage_obj
-            if not chunk.choices:
-                continue
-            choice = chunk.choices[0]
-            delta = choice.delta
-            if getattr(delta, "tool_calls", None):
-                saw_tool_calls = True
-                for tc in delta.tool_calls:
-                    idx = tc.index
-                    slot = tool_calls_accum.setdefault(idx, {"id": None, "name": "", "arguments": ""})
-                    if getattr(tc, "id", None):
-                        slot["id"] = tc.id
-                    fn = getattr(tc, "function", None)
-                    if fn is not None:
-                        if getattr(fn, "name", None):
-                            slot["name"] += fn.name
-                        if getattr(fn, "arguments", None):
-                            slot["arguments"] += fn.arguments
-            if getattr(delta, "content", None):
-                content_parts.append(delta.content)
-                if not saw_tool_calls:
-                    on_delta(delta.content)
-            if getattr(choice, "finish_reason", None):
-                finish_reason = choice.finish_reason
-
-        tool_calls: list[ToolCall] = []
-        for idx in sorted(tool_calls_accum):
-            slot = tool_calls_accum[idx]
-            try:
-                args = json.loads(slot["arguments"] or "{}")
-            except json.JSONDecodeError:
-                args = {}
-            tool_calls.append(ToolCall(id=slot["id"] or "", name=slot["name"], arguments=args))
-
-        stop_reason = self._map_finish_reason(finish_reason)
-        token_usage = self._extract_usage_from_chunk(usage_obj)
-        return LLMResult(
-            content="".join(content_parts),
-            tool_calls=tool_calls,
-            stop_reason=stop_reason,
-            token_usage=token_usage,
-        )
-
-    @staticmethod
-    def _map_finish_reason(finish: str | None) -> Literal["end_turn", "tool_use", "max_tokens", "other"]:
-        if finish == "tool_calls":
-            return "tool_use"
-        if finish == "length":
-            return "max_tokens"
-        if finish in {"stop", None}:
-            return "end_turn"
-        return "other"
-
-    @staticmethod
-    def _extract_usage(completion) -> dict[str, int]:
-        usage = getattr(completion, "usage", None)
-        if not usage:
-            return {}
-        return {
-            "input": getattr(usage, "prompt_tokens", 0) or 0,
-            "output": getattr(usage, "completion_tokens", 0) or 0,
-        }
-
-    @staticmethod
-    def _extract_usage_from_chunk(usage_obj) -> dict[str, int]:
-        if not usage_obj:
-            return {}
-        return {
-            "input": getattr(usage_obj, "prompt_tokens", 0) or 0,
-            "output": getattr(usage_obj, "completion_tokens", 0) or 0,
-        }
+        return _consume_openai_stream(stream, on_delta)
 
     def stream_chat(
         self,
@@ -294,7 +335,7 @@ class OpenAIProvider:
         client = self._get_client()
         stream = client.chat.completions.create(
             model=self.model,
-            messages=[{"role": "system", "content": system}, *self._to_openai_messages(messages)],
+            messages=[{"role": "system", "content": system}, *_to_openai_wire_messages(messages)],
             stream=True,
             **self._token_params(max_tokens),
         )
@@ -325,17 +366,47 @@ class OpenAIProvider:
 
     def generate_image(self, prompt: str) -> bytes:
         client = self._get_client()
-        kwargs: dict[str, Any] = {
+        response = client.images.generate(**self._image_generate_kwargs(prompt))
+        return base64.b64decode(response.data[0].b64_json)
+
+
+class OpenAIProvider(_OpenAICompatProvider):
+    BASE_URL = None  # default OpenAI endpoint
+    API_KEY_ENV_VAR = "OPENAI_API_KEY"
+
+    def _token_params(self, max_tokens: int) -> dict[str, Any]:
+        # Newer OpenAI reasoning models only accept max_completion_tokens and
+        # reject `temperature`. Legacy chat models still use max_tokens.
+        if _is_new_gen_openai(self.model):
+            return {"max_completion_tokens": max_tokens}
+        return {"max_tokens": max_tokens, "temperature": 0.2}
+
+
+class XAIProvider(_OpenAICompatProvider):
+    """xAI (Grok) — OpenAI-wire compatible, different base URL and image params.
+
+    Models:
+      text:  grok-4-1-fast-reasoning, grok-4.20-0309-reasoning, ...
+      image: grok-imagine-image, grok-imagine-image-pro
+
+    Differences from OpenAI that matter here:
+      - `images.generate` rejects `size` (uses `aspect_ratio`/`resolution`).
+        We omit `size` and request `response_format=b64_json` so we can
+        decode bytes locally, matching the rest of the pipeline.
+      - All current grok chat models accept `max_tokens` + `temperature`
+        the classic way — no `max_completion_tokens` split.
+    """
+
+    BASE_URL = "https://api.x.ai/v1"
+    API_KEY_ENV_VAR = "XAI_API_KEY"
+
+    def _image_generate_kwargs(self, prompt: str) -> dict[str, Any]:
+        return {
             "model": self.image_model,
             "prompt": prompt,
-            "size": "1024x1024",
+            "n": 1,
+            "response_format": "b64_json",
         }
-        # gpt-image-1 rejects `response_format` (b64 is the default); only legacy
-        # DALL-E models need the explicit flag.
-        if self.image_model.startswith("dall-e"):
-            kwargs["response_format"] = "b64_json"
-        response = client.images.generate(**kwargs)
-        return base64.b64decode(response.data[0].b64_json)
 
 
 # --------------------------------------------------------------------------- #
@@ -698,24 +769,27 @@ def get_llm(
     image_provider: str,
     image_model: str,
     region: str = "us-east-1",
+    api_keys: dict[str, str | None] | None = None,
 ) -> LLMProvider:
-    text: LLMProvider
-    if provider == "bedrock":
-        text = BedrockProvider(model=model, image_model=image_model, region=region)
-    else:
-        text = OpenAIProvider(model=model, image_model=image_model)
+    """Build an LLM client for the requested provider(s).
 
+    `api_keys` carries per-provider keys that need explicit wiring (xAI today;
+    OpenAI reads OPENAI_API_KEY from env directly, Bedrock uses the AWS SDK
+    credential chain).
+    """
+    api_keys = api_keys or {}
+
+    def build(p: str) -> LLMProvider:
+        if p == "bedrock":
+            return BedrockProvider(model=model, image_model=image_model, region=region)
+        if p == "xai":
+            return XAIProvider(model=model, image_model=image_model, api_key=api_keys.get("xai"))
+        return OpenAIProvider(model=model, image_model=image_model)
+
+    text = build(provider)
     if image_provider == provider:
         return text
-
-    # Mixed: text and image come from different backends.
-    image_llm: LLMProvider
-    if image_provider == "bedrock":
-        image_llm = BedrockProvider(model=model, image_model=image_model, region=region)
-    else:
-        image_llm = OpenAIProvider(model=model, image_model=image_model)
-
-    return _CompositeProvider(text=text, image=image_llm)
+    return _CompositeProvider(text=text, image=build(image_provider))
 
 
 @dataclass

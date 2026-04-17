@@ -34,6 +34,7 @@ provider:
     SLACK_BOT_TOKEN: ${env:SLACK_BOT_TOKEN}
     SLACK_SIGNING_SECRET: ${env:SLACK_SIGNING_SECRET}
     OPENAI_API_KEY: ${env:OPENAI_API_KEY, ''}
+    XAI_API_KEY: ${env:XAI_API_KEY, ''}
     TAVILY_API_KEY: ${env:TAVILY_API_KEY, ''}
   iam:
     role:

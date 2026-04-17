@@ -21,7 +21,7 @@ Slack 멘션·DM 을 AWS Lambda 에서 처리하고, OpenAI 또는 AWS Bedrock L
 ## 주요 기능
 
 - **이벤트**: `app_mention`, DM(`message.im`)
-- **Provider**: OpenAI · Bedrock(Anthropic Claude 3/3.5 · Amazon Nova) 선택 가능
+- **Provider**: OpenAI · AWS Bedrock(Anthropic Claude 3/3.5/4.x · Amazon Nova) · xAI(Grok) 선택 가능
 - **Tools (네이티브 function calling)**
   - `read_attached_images` — 첨부 이미지 Vision 요약
   - `fetch_thread_history` — 스레드 히스토리 조회
@@ -43,10 +43,11 @@ Slack 멘션·DM 을 AWS Lambda 에서 처리하고, OpenAI 또는 AWS Bedrock L
 | `SLACK_BOT_TOKEN` | ✅ | — | `xoxb-…` |
 | `SLACK_SIGNING_SECRET` | ✅ | — | Slack Signing Secret |
 | `OPENAI_API_KEY` | OpenAI 사용 시 | — | OpenAI API 키 |
+| `XAI_API_KEY` | xAI 사용 시 | — | xAI (Grok) API 키 — https://console.x.ai |
 | `TAVILY_API_KEY` | | — | 설정 시 Tavily 웹 검색 활성화 |
-| `LLM_PROVIDER` | | `openai` | `openai` / `bedrock` |
+| `LLM_PROVIDER` | | `openai` | `openai` / `bedrock` / `xai` |
 | `LLM_MODEL` | | `gpt-4o-mini` | 텍스트 모델 |
-| `IMAGE_PROVIDER` | | `openai` | `openai` / `bedrock` |
+| `IMAGE_PROVIDER` | | `openai` | `openai` / `bedrock` / `xai` |
 | `IMAGE_MODEL` | | `gpt-image-1` | 이미지 모델 |
 | `AGENT_MAX_STEPS` | | `3` | tool 루프 최대 iteration |
 | `RESPONSE_LANGUAGE` | | `ko` | `ko` / `en` |
@@ -64,12 +65,14 @@ Slack 멘션·DM 을 AWS Lambda 에서 처리하고, OpenAI 또는 AWS Bedrock L
 
 ## 모델 매트릭스
 
-| 용도 | OpenAI | Bedrock |
-|------|--------|---------|
-| 텍스트 + tool calling | `gpt-4o-mini`, `gpt-4o` | `anthropic.claude-3-5-sonnet-...`, `amazon.nova-pro-v1:0` |
-| 이미지 생성 | `gpt-image-1` | `amazon.titan-image-generator-v1`, `amazon.nova-canvas-v1:0`, `stability.stable-diffusion-xl-v1` |
+| 용도 | OpenAI | Bedrock | xAI (Grok) |
+|------|--------|---------|------------|
+| 텍스트 + tool calling | `gpt-4o-mini`, `gpt-4o`, `gpt-5-*`, `o1/o3/o4` | `us.anthropic.claude-opus-4-6-v1`, `us.anthropic.claude-sonnet-4-5-...`, `amazon.nova-pro-v1:0` | `grok-4-1-fast-reasoning`, `grok-4.20-0309-reasoning`, `grok-4.20-multi-agent-0309` |
+| 이미지 생성 | `gpt-image-1`, `dall-e-3` | `amazon.nova-canvas-v1:0`, `amazon.titan-image-generator-v2:0` | `grok-imagine-image`, `grok-imagine-image-pro` |
 
-Claude 는 Messages API (`tools=[{name, description, input_schema}]`), Nova 는 Converse API (`toolConfig`) 로 자동 분기됩니다.
+- Claude 는 Messages API (`tools=[{name, description, input_schema}]`), Nova 는 Converse API (`toolConfig`) 로 자동 분기됩니다.
+- xAI 는 OpenAI wire 호환이라 OpenAI Python SDK 에 `base_url="https://api.x.ai/v1"` 만 swap 해서 호출합니다. 별도 `XAIProvider` 클래스로 분리되어 있습니다.
+- Bedrock 최신 모델은 `us./eu./apac./global.` inference-profile prefix 가 붙은 ID 로만 호출됩니다. `BedrockProvider` 가 자동 인식합니다.
 
 ## 로컬 개발
 
@@ -109,7 +112,7 @@ aws iam attach-role-policy --role-name "${NAME}" --policy-arn "arn:aws:iam::${AC
 
 ### 2. GitHub 저장소 설정
 
-- **Secrets**: `AWS_ACCOUNT_ID`, `SLACK_BOT_TOKEN`, `SLACK_SIGNING_SECRET`, `OPENAI_API_KEY`, `TAVILY_API_KEY`(선택)
+- **Secrets**: `AWS_ACCOUNT_ID`, `SLACK_BOT_TOKEN`, `SLACK_SIGNING_SECRET`, `OPENAI_API_KEY`, `XAI_API_KEY`(xAI 사용 시), `TAVILY_API_KEY`(선택)
 - **Variables**: `LLM_PROVIDER`, `LLM_MODEL`, `IMAGE_PROVIDER`, `IMAGE_MODEL`, `RESPONSE_LANGUAGE`, `ALLOWED_CHANNEL_IDS`, `ALLOWED_CHANNEL_MESSAGE`, `SYSTEM_MESSAGE`, `BOT_CURSOR`, `MAX_LEN_SLACK`, `MAX_OUTPUT_TOKENS`, `MAX_THROTTLE_COUNT`, `MAX_HISTORY_CHARS`, `AGENT_MAX_STEPS`, `LOG_LEVEL`
 
 ### 3. 배포

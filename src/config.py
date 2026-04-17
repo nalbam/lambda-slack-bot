@@ -22,7 +22,7 @@ _load_env_local()
 
 
 _VALID_LANGUAGES = {"ko", "en"}
-_VALID_PROVIDERS = {"openai", "bedrock"}
+_VALID_PROVIDERS = {"openai", "bedrock", "xai"}
 
 
 def _int_env(name: str, default: int, minimum: int = 1) -> int:
@@ -76,6 +76,7 @@ class Settings:
     bot_cursor: str = ":robot_face:"
     system_message: str | None = None
     tavily_api_key: str | None = None
+    xai_api_key: str | None = None
     log_level: str = "INFO"
 
     @classmethod
@@ -89,6 +90,7 @@ class Settings:
         response_language = _enum_env("RESPONSE_LANGUAGE", "ko", _VALID_LANGUAGES)
         system_message = os.getenv("SYSTEM_MESSAGE", "").strip() or None
         tavily_key = os.getenv("TAVILY_API_KEY", "").strip() or None
+        xai_key = os.getenv("XAI_API_KEY", "").strip() or None
         return cls(
             slack_bot_token=os.getenv("SLACK_BOT_TOKEN", "").strip(),
             slack_signing_secret=os.getenv("SLACK_SIGNING_SECRET", "").strip(),
@@ -109,6 +111,7 @@ class Settings:
             bot_cursor=os.getenv("BOT_CURSOR", ":robot_face:").strip() or ":robot_face:",
             system_message=system_message,
             tavily_api_key=tavily_key,
+            xai_api_key=xai_key,
             log_level=os.getenv("LOG_LEVEL", "INFO").strip().upper() or "INFO",
         )
 

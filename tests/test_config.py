@@ -19,7 +19,7 @@ def _clear_env(monkeypatch):
         "IMAGE_PROVIDER", "IMAGE_MODEL", "OPENAI_API_KEY", "RESPONSE_LANGUAGE",
         "AGENT_MAX_STEPS", "DYNAMODB_TABLE_NAME", "AWS_REGION", "ALLOWED_CHANNEL_IDS",
         "ALLOWED_CHANNEL_MESSAGE", "MAX_LEN_SLACK", "MAX_THROTTLE_COUNT",
-        "MAX_HISTORY_CHARS", "BOT_CURSOR", "SYSTEM_MESSAGE", "TAVILY_API_KEY", "LOG_LEVEL",
+        "MAX_HISTORY_CHARS", "BOT_CURSOR", "SYSTEM_MESSAGE", "TAVILY_API_KEY", "XAI_API_KEY", "LOG_LEVEL",
     ]:
         monkeypatch.delenv(key, raising=False)
 
@@ -88,3 +88,22 @@ def test_require_slack_credentials_ok(monkeypatch, reload_config):
     monkeypatch.setenv("SLACK_SIGNING_SECRET", "secret")
     s = reload_config()
     s.require_slack_credentials()  # no raise
+
+
+def test_xai_provider_is_a_valid_enum_value(monkeypatch, reload_config):
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("LLM_PROVIDER", "xai")
+    monkeypatch.setenv("IMAGE_PROVIDER", "xai")
+    s = reload_config()
+    assert s.llm_provider == "xai"
+    assert s.image_provider == "xai"
+
+
+def test_xai_api_key_default_none_and_override(monkeypatch, reload_config):
+    _clear_env(monkeypatch)
+    s = reload_config()
+    assert s.xai_api_key is None
+
+    monkeypatch.setenv("XAI_API_KEY", "xai-abc")
+    s2 = reload_config()
+    assert s2.xai_api_key == "xai-abc"

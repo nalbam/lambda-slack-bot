@@ -80,12 +80,16 @@ agent like everything else.
 
 Duplicate tool-call suppression: `_call_signature` = `name + sha1(args_json)`. A repeated signature within the loop is short-circuited with `{"ok": False, "error": "duplicate call skipped"}` and handed back to the LLM so it can move on.
 
-### Two LLM provider families, one Protocol
+### Three LLM provider families, one Protocol
 
-`LLMProvider` is a Protocol implemented by `OpenAIProvider` and `BedrockProvider`. Bedrock routes internally on model family prefix:
-- `anthropic.claude*` → `invoke_model` with Messages API shape, `content[].type=="tool_use"` parsing.
-- `amazon.nova*` → `converse` / `converse_stream` with `toolConfig` + `output.message.content[].toolUse`.
-- Unknown → Claude path without tools.
+`LLMProvider` is a Protocol implemented by `OpenAIProvider`, `XAIProvider`, and `BedrockProvider`. OpenAI and xAI share the OpenAI wire format, so they both extend `_OpenAICompatProvider` and reuse the module-level helpers (`_to_openai_wire_messages`, `_parse_openai_completion`, `_consume_openai_stream`) rather than duplicating stream/tool_calls handling.
+
+- **OpenAIProvider**: default OpenAI endpoint. `_token_params` switches between `max_tokens` (legacy chat) and `max_completion_tokens` (gpt-5 / o1 / o3 / o4 reasoning).
+- **XAIProvider**: `base_url="https://api.x.ai/v1"`, explicit `api_key`. Grok chat models accept the legacy `max_tokens + temperature` combo, so we never use `max_completion_tokens` here. Image generation omits `size` (xAI uses `aspect_ratio` / `resolution`) and always requests `response_format="b64_json"` so we can decode bytes locally.
+- **BedrockProvider**: routes internally on model family prefix (Bedrock IDs and their `us./eu./apac./global.` inference-profile variants are both accepted):
+  - `anthropic.claude*` → `invoke_model` with Messages API shape, `content[].type=="tool_use"` parsing.
+  - `amazon.nova*` → `converse` / `converse_stream` with `toolConfig` + `output.message.content[].toolUse`.
+  - Unknown → Claude path without tools.
 
 `_to_anthropic_messages` / `_to_nova_messages` translate our canonical role/tool_calls/tool messages to each backend's shape. `tool` role becomes an Anthropic `tool_result` content block inside a user message; Nova becomes a `toolResult` content block.
 
