@@ -14,13 +14,22 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
+import time
+from pathlib import Path
 
 
 logging.basicConfig(level=logging.WARNING, format="%(levelname)s %(name)s: %(message)s")
 
 
+LOCAL_UPLOAD_DIR = Path("./.uploads")
+
+
 class _StubSlackClient:
-    """Returns empty but structurally correct responses for every Slack call."""
+    """Returns empty but structurally correct responses for every Slack call.
+
+    `files_upload_v2` writes the received bytes to ./.uploads/ so you can
+    actually open generated images instead of discarding them.
+    """
 
     def conversations_replies(self, **_):
         return {"messages": []}
@@ -28,8 +37,15 @@ class _StubSlackClient:
     def search_messages(self, **_):
         return {"messages": {"matches": []}}
 
-    def files_upload_v2(self, **_):
-        return {"file": {"permalink": "", "title": "generated.png"}}
+    def files_upload_v2(self, *, file=None, filename="generated.bin", **_):
+        if file is None:
+            return {"file": {"permalink": "", "title": filename}}
+        LOCAL_UPLOAD_DIR.mkdir(exist_ok=True)
+        ts = int(time.time() * 1000)
+        path = LOCAL_UPLOAD_DIR / f"{ts}-{filename}"
+        path.write_bytes(file)
+        resolved = path.resolve()
+        return {"file": {"permalink": resolved.as_uri(), "title": filename}}
 
     def users_info(self, **_):
         return {"user": {"profile": {"display_name": "local-user"}}}
