@@ -186,11 +186,116 @@ def test_read_attached_images_skips_non_image_mimetypes():
 # --------------------------------------------------------------------------- #
 
 
-def test_fetch_thread_history_shapes_output():
+def test_fetch_thread_history_resolves_user_files_and_reactions():
+    """History should carry display names, file metadata, and reactions so the
+    LLM can answer things like "누가 좋아요 눌렀어?" or "아까 그 이미지 분석해줘"."""
+    from src.slack_helpers import user_name_cache
+
+    # Reset the module-level cache so prior tests don't leak.
+    user_name_cache._cache.clear()
+
     client = MagicMock()
-    client.conversations_replies.return_value = {"messages": [{"user": "U1", "text": "hi"}]}
+    client.conversations_replies.return_value = {
+        "messages": [
+            {
+                "user": "U1",
+                "text": "look at this",
+                "ts": "1713.1",
+                "files": [
+                    {
+                        "name": "cat.png",
+                        "mimetype": "image/png",
+                        "url_private_download": "https://files.slack.com/x/cat.png",
+                        "permalink": "https://slack/p1",
+                        "title": "cute",
+                    }
+                ],
+            },
+            {
+                "user": "U2",
+                "text": "nice!",
+                "ts": "1713.2",
+                "reactions": [
+                    {"name": "thumbsup", "count": 2, "users": ["U1", "U3"]},
+                ],
+            },
+        ]
+    }
+
+    def _users_info(user):
+        return {"user": {"profile": {"display_name": f"name-{user}"}}}
+
+    client.users_info.side_effect = _users_info
+
     out = fetch_thread_history(_ctx(slack_client=client), limit=5)
-    assert out == [{"user": "U1", "text": "hi"}]
+    assert len(out) == 2
+    first, second = out
+    assert first["user"] == "name-U1"
+    assert first["text"] == "look at this"
+    assert first["ts"] == "1713.1"
+    assert first["files"] == [
+        {
+            "name": "cat.png",
+            "mimetype": "image/png",
+            "url_private_download": "https://files.slack.com/x/cat.png",
+            "permalink": "https://slack/p1",
+            "title": "cute",
+        }
+    ]
+    assert first["reactions"] == []
+
+    assert second["user"] == "name-U2"
+    assert second["files"] == []
+    assert second["reactions"] == [
+        {"emoji": "thumbsup", "count": 2, "users": ["name-U1", "name-U3"]}
+    ]
+
+
+def test_read_attached_images_accepts_extra_urls():
+    """Images referenced from fetch_thread_history (url_private_download) must
+    be loadable via read_attached_images(urls=[...])."""
+    ctx = _ctx()
+    ctx.llm.describe_image.return_value = "a cat history"
+    with patch("src.tools.urllib.request.urlopen") as opener:
+        opener.return_value.__enter__.return_value.read.return_value = b"fake-bytes"
+        out = read_attached_images(
+            ctx,
+            limit=5,
+            urls=["https://files.slack.com/x/cat.png"],
+        )
+    assert out == [{"name": "cat.png", "summary": "a cat history"}]
+
+
+def test_read_attached_images_urls_reject_non_slack_host():
+    ctx = _ctx()
+    with pytest.raises(ValueError):
+        read_attached_images(ctx, urls=["https://evil.example.com/cat.png"])
+
+
+def test_read_attached_images_respects_total_limit_across_event_and_urls():
+    event = {
+        "files": [
+            {
+                "mimetype": "image/png",
+                "url_private_download": "https://files.slack.com/e1.png",
+                "name": "e1.png",
+            }
+        ]
+    }
+    ctx = _ctx(event=event)
+    ctx.llm.describe_image.return_value = "desc"
+    with patch("src.tools.urllib.request.urlopen") as opener:
+        opener.return_value.__enter__.return_value.read.return_value = b"x"
+        out = read_attached_images(
+            ctx,
+            limit=2,
+            urls=[
+                "https://files.slack.com/u1.png",
+                "https://files.slack.com/u2.png",  # should be skipped (limit=2)
+            ],
+        )
+    assert len(out) == 2
+    assert {item["name"] for item in out} == {"e1.png", "u1.png"}
 
 
 # --------------------------------------------------------------------------- #

@@ -21,6 +21,7 @@ from slack_sdk.errors import SlackApiError
 
 from src.config import Settings
 from src.llm import LLMProvider, ToolCall
+from src.slack_helpers import user_name_cache
 
 logger = logging.getLogger(__name__)
 
@@ -135,51 +136,151 @@ default_registry = ToolRegistry()
 @tool(
     default_registry,
     name="read_attached_images",
-    description="Read images attached to the current Slack mention and return textual descriptions.",
+    description=(
+        "Read image files and return textual descriptions. By default reads "
+        "images attached to the current Slack mention. Pass `urls` to also "
+        "read images referenced from thread history (e.g. url_private_download "
+        "returned by fetch_thread_history)."
+    ),
     parameters={
         "type": "object",
-        "properties": {"limit": {"type": "integer", "minimum": 1, "maximum": 10, "default": 3}},
+        "properties": {
+            "limit": {"type": "integer", "minimum": 1, "maximum": 10, "default": 3},
+            "urls": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Additional Slack file URLs to describe (must be on files*.slack.com).",
+            },
+        },
         "required": [],
     },
 )
-def read_attached_images(ctx: ToolContext, limit: int = 3) -> list[dict[str, str]]:
-    files = ctx.event.get("files") or []
+def read_attached_images(
+    ctx: ToolContext,
+    limit: int = 3,
+    urls: list[str] | None = None,
+) -> list[dict[str, str]]:
     token = ctx.settings.slack_bot_token
     out: list[dict[str, str]] = []
-    for file_info in files[:limit]:
+    seen: set[str] = set()
+
+    def _fetch(url: str, mime_hint: str, name: str) -> None:
+        if url in seen:
+            return
+        seen.add(url)
+        parsed = urllib.parse.urlparse(url)
+        if parsed.scheme != "https" or parsed.hostname not in SLACK_FILE_HOSTS:
+            raise ValueError("invalid Slack file download URL")
+        req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
+        with urllib.request.urlopen(req, timeout=15) as response:  # noqa: S310 (host allowlisted)
+            data = response.read()
+        mime = mime_hint if mime_hint.startswith("image/") else _guess_image_mime(url)
+        if not mime.startswith("image/"):
+            return
+        out.append({"name": name, "summary": ctx.llm.describe_image(data, mime)})
+
+    # 1) Images from the current mention event
+    for file_info in (ctx.event.get("files") or [])[:limit]:
+        if len(out) >= limit:
+            break
         mime = str(file_info.get("mimetype", ""))
         if not mime.startswith("image/"):
             continue
-        download_url = file_info.get("url_private_download") or file_info.get("url_private")
-        if not download_url:
+        dl = file_info.get("url_private_download") or file_info.get("url_private")
+        if not dl:
             continue
-        parsed = urllib.parse.urlparse(download_url)
-        if parsed.scheme != "https" or parsed.hostname not in SLACK_FILE_HOSTS:
-            raise ValueError("invalid Slack file download URL")
-        req = urllib.request.Request(download_url, headers={"Authorization": f"Bearer {token}"})
-        with urllib.request.urlopen(req, timeout=15) as response:  # noqa: S310 (host allowlisted)
-            data = response.read()
-        out.append({"name": file_info.get("name", "image"), "summary": ctx.llm.describe_image(data, mime)})
+        _fetch(dl, mime, file_info.get("name", "image"))
+
+    # 2) Extra URLs provided by the caller (typically from fetch_thread_history)
+    for extra in (urls or []):
+        if len(out) >= limit:
+            break
+        _fetch(extra, "", _filename_from_url(extra))
+
     return out
+
+
+def _guess_image_mime(url: str) -> str:
+    path = urllib.parse.urlparse(url).path.lower()
+    for ext, mime in (
+        (".png", "image/png"),
+        (".jpg", "image/jpeg"),
+        (".jpeg", "image/jpeg"),
+        (".gif", "image/gif"),
+        (".webp", "image/webp"),
+        (".bmp", "image/bmp"),
+        (".heic", "image/heic"),
+    ):
+        if path.endswith(ext):
+            return mime
+    return "image/png"  # conservative default; describe_image will still attempt
+
+
+def _filename_from_url(url: str) -> str:
+    path = urllib.parse.urlparse(url).path
+    name = path.rsplit("/", 1)[-1] if path else "image"
+    return name or "image"
 
 
 @tool(
     default_registry,
     name="fetch_thread_history",
-    description="Fetch recent messages from the current Slack thread for context.",
+    description=(
+        "Fetch recent messages from the current Slack thread for context. "
+        "Returns each message's user display name, text, file metadata "
+        "(for images include url_private_download so read_attached_images "
+        "can describe them), reactions with emoji names and reacting users, "
+        "and timestamp."
+    ),
     parameters={
         "type": "object",
         "properties": {"limit": {"type": "integer", "minimum": 1, "maximum": 50, "default": 20}},
         "required": [],
     },
 )
-def fetch_thread_history(ctx: ToolContext, limit: int = 20) -> list[dict[str, str]]:
+def fetch_thread_history(ctx: ToolContext, limit: int = 20) -> list[dict[str, Any]]:
+    def _map(res: dict[str, Any]) -> list[dict[str, Any]]:
+        client = ctx.slack_client
+        out: list[dict[str, Any]] = []
+        for item in res.get("messages", []):
+            user_id = item.get("user") or item.get("bot_id") or ""
+            files = []
+            for f in item.get("files") or []:
+                files.append(
+                    {
+                        "name": f.get("name", ""),
+                        "mimetype": f.get("mimetype", ""),
+                        "url_private_download": f.get("url_private_download", ""),
+                        "permalink": f.get("permalink", ""),
+                        "title": f.get("title", ""),
+                    }
+                )
+            reactions = []
+            for r in item.get("reactions") or []:
+                reacting_users = [user_name_cache.get(client, u) for u in (r.get("users") or [])]
+                reactions.append(
+                    {
+                        "emoji": r.get("name", ""),
+                        "count": r.get("count", 0),
+                        "users": reacting_users,
+                    }
+                )
+            out.append(
+                {
+                    "user": user_name_cache.get(client, user_id) if user_id else "",
+                    "text": item.get("text", ""),
+                    "ts": item.get("ts", ""),
+                    "files": files,
+                    "reactions": reactions,
+                }
+            )
+        return out
+
     return _with_slack_retry(
-        lambda: ctx.slack_client.conversations_replies(channel=ctx.channel, ts=ctx.thread_ts, limit=limit),
-        lambda res: [
-            {"user": item.get("user", ""), "text": item.get("text", "")}
-            for item in res.get("messages", [])
-        ],
+        lambda: ctx.slack_client.conversations_replies(
+            channel=ctx.channel, ts=ctx.thread_ts, limit=limit
+        ),
+        _map,
         label="conversations_replies",
     )
 
