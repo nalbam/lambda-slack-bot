@@ -1,13 +1,20 @@
 import json
+import logging
 import urllib.parse
+import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from typing import Any
 
 from slack_sdk import WebClient
+from slack_sdk.errors import SlackApiError
 
 from lambda_slack_bot.config import Settings
 from lambda_slack_bot.llm import LLMClient
+
+logger = logging.getLogger(__name__)
+SLACK_FILE_HOSTS = {"files.slack.com"}
+WEB_SEARCH_HOST = "api.duckduckgo.com"
 
 
 @dataclass
@@ -46,7 +53,8 @@ class ToolExecutor:
             return {"ok": False, "error": f"unknown tool: {name}"}
         try:
             return {"ok": True, "result": self._tools[name](**(arguments or {}))}
-        except Exception as exc:  # pylint: disable=broad-exception-caught
+        except (KeyError, TypeError, ValueError, urllib.error.URLError, json.JSONDecodeError, SlackApiError) as exc:
+            logger.exception("Tool execution failed: %s", name)
             return {"ok": False, "error": str(exc)}
 
     def read_attached_images(self, limit: int = 3) -> list[dict[str, str]]:
@@ -56,11 +64,15 @@ class ToolExecutor:
         for file_info in files[:limit]:
             if not str(file_info.get("mimetype", "")).startswith("image/"):
                 continue
+            download_url = file_info["url_private_download"]
+            parsed = urllib.parse.urlparse(download_url)
+            if parsed.scheme != "https" or parsed.hostname not in SLACK_FILE_HOSTS:
+                raise ValueError("invalid Slack file download URL")
             req = urllib.request.Request(
-                file_info["url_private_download"],
+                download_url,
                 headers={"Authorization": f"Bearer {token}"},
             )
-            with urllib.request.urlopen(req, timeout=15) as response:  # nosec B310
+            with urllib.request.urlopen(req, timeout=15) as response:
                 data = response.read()
             out.append(
                 {
@@ -89,7 +101,10 @@ class ToolExecutor:
     def search_web(self, query: str, limit: int = 5) -> list[dict[str, str]]:
         params = urllib.parse.urlencode({"q": query, "format": "json", "no_redirect": 1, "no_html": 1})
         url = f"https://api.duckduckgo.com/?{params}"
-        with urllib.request.urlopen(url, timeout=15) as response:  # nosec B310
+        parsed = urllib.parse.urlparse(url)
+        if parsed.scheme != "https" or parsed.hostname != WEB_SEARCH_HOST:
+            raise ValueError("invalid web search URL")
+        with urllib.request.urlopen(url, timeout=15) as response:
             payload = json.loads(response.read().decode("utf-8"))
 
         results = []

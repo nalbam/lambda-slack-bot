@@ -13,16 +13,24 @@ class AgentResult:
 
 
 class SlackMentionAgent:
-    def __init__(self, llm: LLMClient, context: ToolContext, max_steps: int, tool_executor: ToolExecutor | None = None):
+    def __init__(
+        self,
+        llm: LLMClient,
+        context: ToolContext,
+        max_steps: int,
+        tool_executor: ToolExecutor | None = None,
+        response_language: str = "ko",
+    ):
         self.llm = llm
         self.context = context
         self.max_steps = max_steps
         self.tools = tool_executor or ToolExecutor(context)
+        self.response_language = response_language
 
     def run(self, user_message: str) -> AgentResult:
         system = (
             "You are an assistant for Slack mention requests. "
-            "Plan work, use tools when needed, and provide concise helpful final answers in Korean."
+            f"Plan work, use tools when needed, and provide concise helpful final answers in language: {self.response_language}."
         )
         planner_prompt = (
             "Return strict JSON with keys: goal, plan (array), tool_calls (array of {name, arguments}), "
@@ -35,12 +43,12 @@ class SlackMentionAgent:
         next_calls = state.get("tool_calls", []) or []
         image_url = None
 
-        for _ in range(self.max_steps):
+        for step in range(self.max_steps):
             if not next_calls:
                 break
             for call in next_calls:
                 result = self.tools.execute(call.get("name", ""), call.get("arguments", {}))
-                observations.append({"tool_call": call, "result": result})
+                observations.append({"step": step + 1, "tool_call": call, "result": result})
                 if call.get("name") == "generate_image" and result.get("ok"):
                     image_url = result.get("result", {}).get("permalink")
 
@@ -60,7 +68,7 @@ class SlackMentionAgent:
 
         final_text = self.llm.chat_text(
             system,
-            "Compose the final Slack response. Use Korean by default and include clear bullet points when helpful.\n\n"
+            f"Compose the final Slack response in language: {self.response_language}. Include clear bullet points when helpful.\n\n"
             f"User message:\n{user_message}\n\n"
             f"Plan:\n{json.dumps(state.get('plan', []), ensure_ascii=False)}\n\n"
             f"Observations:\n{json.dumps(observations, ensure_ascii=False)}\n\n"

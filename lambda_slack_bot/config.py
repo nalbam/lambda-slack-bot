@@ -11,6 +11,7 @@ class Settings:
     image_provider: str
     image_model: str
     agent_max_steps: int
+    response_language: str
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -22,4 +23,5 @@ class Settings:
             image_provider=os.getenv("IMAGE_PROVIDER", os.getenv("LLM_PROVIDER", "openai")).lower(),
             image_model=os.getenv("IMAGE_MODEL", "gpt-image-1"),
             agent_max_steps=int(os.getenv("AGENT_MAX_STEPS", "3")),
+            response_language=os.getenv("RESPONSE_LANGUAGE", "ko"),
         )

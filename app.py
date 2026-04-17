@@ -16,6 +16,11 @@ if not settings.slack_bot_token or not settings.slack_signing_secret:
 
 app = App(token=settings.slack_bot_token, signing_secret=settings.slack_signing_secret, process_before_response=True)
 
+LABELS = {
+    "ko": {"generated_image": "생성된 이미지", "error_prefix": "요청 처리 중 오류가 발생했습니다"},
+    "en": {"generated_image": "Generated image", "error_prefix": "An error occurred while processing your request"},
+}
+
 
 @app.event("app_mention")
 def handle_app_mention(event, say, client, logger):
@@ -37,17 +42,26 @@ def handle_app_mention(event, say, client, logger):
         settings=settings,
         llm=llm,
     )
-    agent = SlackMentionAgent(llm=llm, context=context, max_steps=settings.agent_max_steps)
+    agent = SlackMentionAgent(
+        llm=llm,
+        context=context,
+        max_steps=settings.agent_max_steps,
+        response_language=settings.response_language,
+    )
+    labels = LABELS.get(settings.response_language, LABELS["en"])
 
     try:
         result = agent.run(text)
         message = result.text
         if result.image_url:
-            message = f"{message}\n\n생성된 이미지: {result.image_url}"
+            message = f"{message}\n\n{labels['generated_image']}: {result.image_url}"
         say(text=message, thread_ts=thread_ts)
-    except Exception as exc:  # pylint: disable=broad-exception-caught
+    except (RuntimeError, ValueError) as exc:
         logger.exception("Failed to handle mention")
-        say(text=f"요청 처리 중 오류가 발생했습니다: {exc}", thread_ts=thread_ts)
+        say(text=f"{labels['error_prefix']}: {exc}", thread_ts=thread_ts)
+    except Exception:
+        logger.exception("Unexpected failure while handling mention")
+        raise
 
 
 def lambda_handler(event, context):

@@ -27,7 +27,7 @@ class FakeLLM:
         }
 
     def chat_text(self, _system, _prompt):
-        return "최종 응답"
+        return "Final response"
 
 
 class FakeTools:
@@ -54,9 +54,9 @@ class AgentTests(unittest.TestCase):
         )
 
         agent = SlackMentionAgent(llm=llm, context=context, max_steps=2, tool_executor=tools)
-        result = agent.run("질문")
+        result = agent.run("question")
 
-        self.assertEqual(result.text, "최종 응답")
+        self.assertEqual(result.text, "Final response")
         self.assertIsNone(result.image_url)
         self.assertEqual(len(tools.called), 1)
         self.assertEqual(tools.called[0][0], "search_web")

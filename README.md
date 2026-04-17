@@ -26,6 +26,7 @@ Slack 멘션을 AWS Lambda에서 처리하고, OpenAI 또는 AWS Bedrock LLM을 
 - `IMAGE_PROVIDER` (`openai` or `bedrock`)
 - `IMAGE_MODEL` (예: `gpt-image-1`, `amazon.titan-image-generator-v1`)
 - `AGENT_MAX_STEPS` (기본: `3`)
+- `RESPONSE_LANGUAGE` (기본: `ko`, 예: `en`)
 
 ## 로컬 테스트
 

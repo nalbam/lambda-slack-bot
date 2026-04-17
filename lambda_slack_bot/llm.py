@@ -1,8 +1,11 @@
 import base64
 import json
+import logging
 from typing import Any
 
 import boto3
+
+logger = logging.getLogger(__name__)
 
 
 class LLMClient:
@@ -11,7 +14,9 @@ class LLMClient:
         self.model = model
         self.image_provider = image_provider
         self.image_model = image_model
-        self._bedrock = boto3.client("bedrock-runtime") if provider == "bedrock" or image_provider == "bedrock" else None
+        self._bedrock = None
+        if provider == "bedrock" or image_provider == "bedrock":
+            self._bedrock = boto3.client("bedrock-runtime")
 
     def chat_text(self, system_prompt: str, user_prompt: str) -> str:
         if self.provider == "bedrock":
@@ -23,11 +28,25 @@ class LLMClient:
         try:
             return json.loads(raw)
         except json.JSONDecodeError:
-            start = raw.find("{")
-            end = raw.rfind("}")
-            if start >= 0 and end > start:
-                return json.loads(raw[start : end + 1])
+            extracted = self._extract_first_json_object(raw)
+            if extracted is not None:
+                logger.warning("LLM returned non-JSON wrapper; extracted first JSON object")
+                return extracted
             return {}
+
+    @staticmethod
+    def _extract_first_json_object(raw: str) -> dict[str, Any] | None:
+        decoder = json.JSONDecoder()
+        for idx, char in enumerate(raw):
+            if char != "{":
+                continue
+            try:
+                candidate, _ = decoder.raw_decode(raw[idx:])
+            except json.JSONDecodeError:
+                continue
+            if isinstance(candidate, dict):
+                return candidate
+        return None
 
     def describe_image(self, image_bytes: bytes, mime_type: str) -> str:
         if self.provider == "bedrock":
@@ -78,7 +97,12 @@ class LLMClient:
         from openai import OpenAI
 
         client = OpenAI()
-        response = client.images.generate(model=self.image_model, prompt=prompt, size="1024x1024")
+        response = client.images.generate(
+            model=self.image_model,
+            prompt=prompt,
+            size="1024x1024",
+            response_format="b64_json",
+        )
         return base64.b64decode(response.data[0].b64_json)
 
     def _openai_chat(self, system_prompt: str, user_prompt: str) -> str:
