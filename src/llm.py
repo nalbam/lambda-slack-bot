@@ -1,12 +1,18 @@
 """LLM provider abstraction with native function calling.
 
-Two providers:
-- OpenAIProvider: chat completions with `tools=`, vision, image generation.
-- BedrockProvider: family-routed. Claude 3/3.5 uses Messages API with tools;
+Three providers:
+- OpenAIProvider: OpenAI chat completions with `tools=`, vision, image generation.
+- XAIProvider: xAI (Grok) — OpenAI-wire compatible at https://api.x.ai/v1.
+  Shares `_OpenAICompatProvider` machinery with OpenAI; differs in image kwargs
+  (omits `size`, forces `response_format=b64_json`) and token params
+  (always `max_tokens` + `temperature`).
+- BedrockProvider: family-routed. Anthropic Claude uses Messages API with tools;
   Amazon Nova uses Converse API with toolConfig; others fall back to plain text.
+  Accepts both bare model IDs and `us./eu./apac./global.` inference-profile IDs.
 
-Both providers implement the LLMProvider protocol so the Agent loop is
-provider-agnostic.
+All providers implement the LLMProvider protocol so the Agent loop is
+provider-agnostic. `_CompositeProvider` wraps two providers when text and
+image providers differ (e.g., OpenAI text + xAI image).
 """
 from __future__ import annotations
 

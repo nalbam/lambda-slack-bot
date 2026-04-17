@@ -31,8 +31,8 @@ Slack 멘션·DM 을 AWS Lambda 에서 처리하고, OpenAI 또는 AWS Bedrock L
   - DynamoDB 조건부 put 으로 Slack 재시도 **중복 제거**
   - 채널 allowlist · 유저당 동시 요청 **throttle**
   - DynamoDB 기반 **스레드 대화 메모리** (TTL 1h)
-  - 긴 응답 **3단계 분할** 전송 (코드블록 → 문단 → 문장), `chat.update` 가 `msg_too_long` 에 걸리지 않도록 `MAX_LEN_SLACK` 기반 rolling 스트리밍 + 최종 답변 자동 split
-  - 스트리밍 `chat_update` (`chat.startStream`/`appendStream`/`stopStream` 지원, 미지원 워크스페이스는 fallback), `assistant_threads_setStatus` 타이핑 인디케이터
+  - 긴 응답 **계층적 분할** 전송 (코드블록 → 문단 → 문장 → hard slice), `chat.update` 가 `msg_too_long` 에 걸리지 않도록 `MAX_LEN_SLACK` 기반 rolling 스트리밍 + 최종 답변 자동 split
+  - 스트리밍 `chat_postMessage` + 반복 `chat_update` fallback (네이티브 `chat.startStream`/`appendStream`/`stopStream` 은 AI 워크스페이스에서 추가 "searching" 상태 UI 를 띄워 두 개의 응답처럼 보이는 이슈 때문에 기본 비활성화, `enable_native=True` 로만 사용), `assistant_threads_setStatus` 타이핑 인디케이터
   - 구조화 JSON 로깅 + request_id, agent 루프 관찰값 기록
   - 에러 메시지 sanitize (토큰·경로 redaction)
 

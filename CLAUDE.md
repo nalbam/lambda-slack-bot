@@ -136,7 +136,7 @@ Stream throttling is handled inside `StreamingMessage.append()` (`min_interval=0
 
 ## Testing
 
-Coverage target 80%+, currently 83% overall. Key approach:
+Coverage target 80%+, currently 86% overall. Key approach:
 - `moto[dynamodb]` for `DedupStore` / `ConversationStore` integration tests.
 - `responses` / `unittest.mock.patch("src.tools.urllib.request.urlopen")` for web tools.
 - `ScriptedLLM` (see `tests/test_agent.py`) emits predefined `LLMResult` sequences to drive loop scenarios without any network.
