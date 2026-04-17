@@ -20,6 +20,7 @@ def _clear_env(monkeypatch):
         "AGENT_MAX_STEPS", "DYNAMODB_TABLE_NAME", "AWS_REGION", "ALLOWED_CHANNEL_IDS",
         "ALLOWED_CHANNEL_MESSAGE", "MAX_LEN_SLACK", "MAX_THROTTLE_COUNT",
         "MAX_HISTORY_CHARS", "BOT_CURSOR", "SYSTEM_MESSAGE", "TAVILY_API_KEY", "XAI_API_KEY", "LOG_LEVEL",
+        "DEFAULT_TIMEZONE", "MAX_DOC_CHARS", "MAX_DOC_PAGES", "MAX_DOC_BYTES",
     ]:
         monkeypatch.delenv(key, raising=False)
 
@@ -107,3 +108,32 @@ def test_xai_api_key_default_none_and_override(monkeypatch, reload_config):
     monkeypatch.setenv("XAI_API_KEY", "xai-abc")
     s2 = reload_config()
     assert s2.xai_api_key == "xai-abc"
+
+
+def test_doc_limits_defaults(monkeypatch, reload_config):
+    _clear_env(monkeypatch)
+    s = reload_config()
+    assert s.default_timezone == "Asia/Seoul"
+    assert s.max_doc_chars == 20_000
+    assert s.max_doc_pages == 50
+    assert s.max_doc_bytes == 25 * 1024 * 1024
+
+
+def test_default_timezone_fallback_on_invalid_env(monkeypatch, reload_config, caplog):
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("DEFAULT_TIMEZONE", "Narnia/Center")
+    with caplog.at_level("WARNING"):
+        s = reload_config()
+    assert s.default_timezone == "Asia/Seoul"
+    assert any("DEFAULT_TIMEZONE" in rec.message for rec in caplog.records)
+
+
+def test_doc_limits_honor_env_and_clamp(monkeypatch, reload_config):
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("MAX_DOC_CHARS", "5000")
+    monkeypatch.setenv("MAX_DOC_PAGES", "0")  # below minimum → clamps to 1
+    monkeypatch.setenv("MAX_DOC_BYTES", "100")  # below minimum → clamps to 65536
+    s = reload_config()
+    assert s.max_doc_chars == 5000
+    assert s.max_doc_pages == 1
+    assert s.max_doc_bytes == 65_536
