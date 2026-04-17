@@ -419,3 +419,37 @@ def test_get_current_time_invalid_tz_via_executor():
     )
     assert result["ok"] is False
     assert "unknown timezone" in result["error"]
+
+
+# --------------------------------------------------------------------------- #
+# read_attached_document
+# --------------------------------------------------------------------------- #
+
+
+def test_read_attached_document_text_file():
+    from src.tools import read_attached_document
+
+    event = {
+        "files": [
+            {
+                "mimetype": "text/plain",
+                "url_private_download": "https://files.slack.com/notes.txt",
+                "name": "notes.txt",
+            }
+        ]
+    }
+    ctx = _ctx(event=event)
+    body = b"Hello\n  world.\nLine 3."
+    with patch("src.tools.urllib.request.urlopen") as opener:
+        resp = opener.return_value.__enter__.return_value
+        resp.read.return_value = body
+        resp.headers = {"Content-Length": str(len(body))}
+        out = read_attached_document(ctx, limit=1)
+    assert len(out) == 1
+    entry = out[0]
+    assert entry["name"] == "notes.txt"
+    assert entry["mimetype"] == "text/plain"
+    assert entry["truncated"] is False
+    assert "Hello" in entry["text"]
+    assert entry["chars"] == len(entry["text"])
+    assert entry["pages"] == 0  # text files report 0 pages
