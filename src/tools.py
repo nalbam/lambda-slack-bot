@@ -256,6 +256,49 @@ def _fetch_slack_file(url: str, token: str, max_bytes: int) -> tuple[bytes, str]
     return body, mime
 
 
+def _parse_pdf(
+    data: bytes,
+    max_pages: int,
+    max_chars: int,
+) -> tuple[str, int, bool]:
+    """Extract text from a PDF. Raises ValueError for recoverable issues so the
+    caller can emit a per-document error entry."""
+    from io import BytesIO
+
+    # Deferred import keeps pypdf out of cold-start for requests that never
+    # touch this tool.
+    from pypdf import PdfReader
+    from pypdf.errors import PdfReadError, DependencyError
+
+    try:
+        reader = PdfReader(BytesIO(data))
+    except PdfReadError as exc:
+        raise ValueError(f"PdfReadError: {exc}") from exc
+    if reader.is_encrypted:
+        raise ValueError("encrypted PDF not supported")
+    page_count = len(reader.pages)
+    if page_count > max_pages:
+        raise ValueError(f"document exceeds MAX_DOC_PAGES={max_pages}")
+    pieces: list[str] = []
+    total = 0
+    truncated = False
+    for page in reader.pages:
+        try:
+            piece = page.extract_text() or ""
+        except (PdfReadError, DependencyError) as exc:
+            raise ValueError(f"PdfReadError: {exc}") from exc
+        pieces.append(piece)
+        total += len(piece)
+        if total >= max_chars:
+            truncated = True
+            break
+    text = "\n".join(pieces)
+    if len(text) > max_chars:
+        text = text[:max_chars]
+        truncated = True
+    return text, page_count, truncated
+
+
 def _parse_text(data: bytes, max_chars: int) -> tuple[str, bool]:
     text = data.decode("utf-8", errors="replace")
     truncated = len(text) > max_chars
@@ -296,7 +339,6 @@ def read_attached_document(
     token = ctx.settings.slack_bot_token
     max_bytes = ctx.settings.max_doc_bytes
     max_chars = ctx.settings.max_doc_chars
-    # max_pages consumed in PDF branch (Task 5)
     out: list[dict[str, Any]] = []
     seen: set[str] = set()
 
@@ -318,8 +360,23 @@ def read_attached_document(
             return
         mime = (header_mime or file_mime_hint or "").lower()
         if mime == DOC_PDF_MIME:
-            # Implemented in Task 5
-            out.append({"name": name, "error": "pdf parsing not implemented yet"})
+            try:
+                text, pages, truncated = _parse_pdf(
+                    body, ctx.settings.max_doc_pages, max_chars
+                )
+            except ValueError as exc:
+                out.append({"name": name, "error": str(exc)})
+                return
+            out.append(
+                {
+                    "name": name,
+                    "mimetype": DOC_PDF_MIME,
+                    "pages": pages,
+                    "chars": len(text),
+                    "truncated": truncated,
+                    "text": text,
+                }
+            )
             return
         if mime.startswith(DOC_TEXT_PREFIX):
             text, truncated = _parse_text(body, max_chars)

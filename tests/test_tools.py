@@ -453,3 +453,120 @@ def test_read_attached_document_text_file():
     assert "Hello" in entry["text"]
     assert entry["chars"] == len(entry["text"])
     assert entry["pages"] == 0  # text files report 0 pages
+
+
+def _build_pdf_bytes(pages_text: list[str]) -> bytes:
+    """Build a minimal PDF (one page per string) using reportlab. Test-only."""
+    from io import BytesIO
+    from reportlab.pdfgen.canvas import Canvas
+    from reportlab.lib.pagesizes import letter
+
+    buf = BytesIO()
+    canvas = Canvas(buf, pagesize=letter)
+    for text in pages_text:
+        canvas.drawString(72, 720, text)
+        canvas.showPage()
+    canvas.save()
+    return buf.getvalue()
+
+
+def _mock_pdf_response(opener, body: bytes, headers=None):
+    """Wire the urlopen mock to stream `body` in chunks through `_fetch_slack_file`."""
+    resp = opener.return_value.__enter__.return_value
+    buf = {"pos": 0}
+
+    def _chunked(n=-1):
+        if n == -1:
+            remaining = body[buf["pos"]:]
+            buf["pos"] = len(body)
+            return remaining
+        chunk = body[buf["pos"]:buf["pos"] + n]
+        buf["pos"] += len(chunk)
+        return chunk
+
+    resp.read.side_effect = _chunked
+    resp.headers = dict(headers or {"Content-Length": str(len(body)), "Content-Type": "application/pdf"})
+
+
+def test_read_attached_document_pdf_happy_path():
+    from src.tools import read_attached_document
+
+    pdf = _build_pdf_bytes(["Hello PDF page one.", "Page two here."])
+    event = {
+        "files": [
+            {
+                "mimetype": "application/pdf",
+                "url_private_download": "https://files.slack.com/report.pdf",
+                "name": "report.pdf",
+            }
+        ]
+    }
+    ctx = _ctx(event=event)
+    with patch("src.tools.urllib.request.urlopen") as opener:
+        _mock_pdf_response(opener, pdf)
+        out = read_attached_document(ctx, limit=1)
+    assert len(out) == 1
+    entry = out[0]
+    assert entry["name"] == "report.pdf"
+    assert entry["pages"] == 2
+    assert entry["truncated"] is False
+    assert entry["chars"] > 0
+
+
+def test_read_attached_document_pdf_truncation():
+    from src.tools import read_attached_document
+
+    pdf = _build_pdf_bytes(["A" * 500])
+    event = {
+        "files": [
+            {
+                "mimetype": "application/pdf",
+                "url_private_download": "https://files.slack.com/big.pdf",
+                "name": "big.pdf",
+            }
+        ]
+    }
+    ctx = _ctx(
+        event=event,
+    )
+    ctx = ToolContext(
+        slack_client=ctx.slack_client,
+        channel=ctx.channel,
+        thread_ts=ctx.thread_ts,
+        event=ctx.event,
+        settings=_settings(max_doc_chars=50),
+        llm=ctx.llm,
+    )
+    with patch("src.tools.urllib.request.urlopen") as opener:
+        _mock_pdf_response(opener, pdf)
+        out = read_attached_document(ctx, limit=1)
+    assert out[0]["truncated"] is True
+    assert out[0]["chars"] == 50
+
+
+def test_read_attached_document_page_cap():
+    from src.tools import read_attached_document
+
+    pdf = _build_pdf_bytes(["p1", "p2", "p3"])
+    event = {
+        "files": [
+            {
+                "mimetype": "application/pdf",
+                "url_private_download": "https://files.slack.com/pages.pdf",
+                "name": "pages.pdf",
+            }
+        ]
+    }
+    ctx = ToolContext(
+        slack_client=MagicMock(),
+        channel="C1",
+        thread_ts="ts1",
+        event=event,
+        settings=_settings(max_doc_pages=2),
+        llm=MagicMock(),
+    )
+    with patch("src.tools.urllib.request.urlopen") as opener:
+        _mock_pdf_response(opener, pdf)
+        out = read_attached_document(ctx, limit=1)
+    assert "error" in out[0]
+    assert "MAX_DOC_PAGES" in out[0]["error"]
