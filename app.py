@@ -246,8 +246,11 @@ def _process(event: dict, client, say, is_dm: bool) -> None:  # noqa: ANN001
     stream_msg.stop(chunks[0])
     for extra in chunks[1:]:
         client.chat_postMessage(channel=channel, thread_ts=thread_ts, text=extra)
-    if result.image_url:
-        say(text=f"{labels['generated_image']}: {result.image_url}", thread_ts=thread_ts)
+    # NOTE: do not post `result.image_url` as a separate text message —
+    # the image is already uploaded inline to the thread by the
+    # generate_image tool, and the LLM's reply is instructed to omit
+    # the permalink. A trailing "생성된 이미지: <url>" line would just
+    # duplicate what the user already sees.
 
     new_history = [
         *history,

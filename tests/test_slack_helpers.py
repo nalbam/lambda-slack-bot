@@ -134,7 +134,7 @@ def _slack_client_native_stream():
 
 def test_streaming_message_native_start_uses_api_call():
     client = _slack_client_native_stream()
-    sm = StreamingMessage(client=client, channel="C1", thread_ts="ts1", placeholder=":robot:")
+    sm = StreamingMessage(client=client, channel="C1", thread_ts="ts1", placeholder=":robot:", enable_native=True)
     sm.start()
     assert sm.ts == "1234.5678"
     assert sm._native is True
@@ -155,7 +155,7 @@ def test_streaming_message_fallback_when_native_fails():
 
 def test_streaming_message_append_throttles():
     client = _slack_client_native_stream()
-    sm = StreamingMessage(client=client, channel="C1", thread_ts="ts1", min_interval=10.0)
+    sm = StreamingMessage(client=client, channel="C1", thread_ts="ts1", min_interval=10.0, enable_native=True)
     sm.start()
     # First append should flush (last_flush=0 -> elapsed > interval)
     sm.append("hello ")
@@ -168,7 +168,7 @@ def test_streaming_message_append_throttles():
 
 def test_streaming_message_stop_finalizes_native():
     client = _slack_client_native_stream()
-    sm = StreamingMessage(client=client, channel="C1", thread_ts="ts1")
+    sm = StreamingMessage(client=client, channel="C1", thread_ts="ts1", enable_native=True)
     sm.start()
     sm.stop("final answer")
     stop_calls = [c for c in client.api_call.call_args_list if c.args[0] == "chat.stopStream"]
@@ -188,7 +188,7 @@ def test_streaming_message_stop_fallback_uses_chat_update():
 
 def test_streaming_message_stop_is_idempotent():
     client = _slack_client_native_stream()
-    sm = StreamingMessage(client=client, channel="C1", thread_ts="ts1")
+    sm = StreamingMessage(client=client, channel="C1", thread_ts="ts1", enable_native=True)
     sm.start()
     sm.stop("a")
     sm.stop("b")

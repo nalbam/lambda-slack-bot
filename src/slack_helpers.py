@@ -131,6 +131,7 @@ class StreamingMessage:
         placeholder: str = ":robot_face:",
         min_interval: float = 0.6,
         max_len: int = 2000,
+        enable_native: bool = False,
     ) -> None:
         self.client = client
         self.channel = channel
@@ -141,6 +142,12 @@ class StreamingMessage:
         # when the rolling buffer approaches this size we finalize the
         # current ts and roll to a fresh chat_postMessage.
         self.max_len = max_len
+        # Native Slack streaming (chat.startStream/appendStream/stopStream)
+        # renders an extra "searching..." status UI beside our message on
+        # AI-enabled workspaces, which looks like two replies to the user.
+        # Default off — stream into a plain chat.postMessage + chat.update
+        # loop so there's exactly one reply ts throughout the session.
+        self.enable_native = enable_native
         self.ts: str | None = None
         self._buffer = ""
         self._last_flush = 0.0
@@ -150,25 +157,33 @@ class StreamingMessage:
     # -- start ---------------------------------------------------------- #
 
     def start(self) -> None:
-        """Initialize the streaming message. Tries native streaming first."""
-        try:
-            res = self.client.api_call(
-                self.NATIVE_METHOD,
-                params={
-                    "channel": self.channel,
-                    "thread_ts": self.thread_ts,
-                    "markdown_text": self.placeholder,
-                },
-            )
-            if res.get("ok"):
-                self.ts = res.get("ts")
-                self._native = True
-                return
-            logger.debug("%s returned not-ok: %s", self.NATIVE_METHOD, res.get("error"))
-        except (SlackApiError, AttributeError, TypeError, KeyError) as exc:
-            logger.debug("%s failed, falling back to postMessage: %s", self.NATIVE_METHOD, exc)
+        """Initialize the streaming message.
 
-        # Fallback: regular message
+        Starts with a plain chat.postMessage so the rest of the lifecycle
+        is a single ts under our control. If `enable_native` is set we
+        also try the Slack native streaming API, but it's off by default
+        because on AI-enabled workspaces it renders an extra "searching"
+        status UI alongside our reply that looks like a second message.
+        """
+        if self.enable_native:
+            try:
+                res = self.client.api_call(
+                    self.NATIVE_METHOD,
+                    params={
+                        "channel": self.channel,
+                        "thread_ts": self.thread_ts,
+                        "markdown_text": self.placeholder,
+                    },
+                )
+                if res.get("ok"):
+                    self.ts = res.get("ts")
+                    self._native = True
+                    return
+                logger.debug("%s returned not-ok: %s", self.NATIVE_METHOD, res.get("error"))
+            except (SlackApiError, AttributeError, TypeError, KeyError) as exc:
+                logger.debug("%s failed, falling back to postMessage: %s", self.NATIVE_METHOD, exc)
+
+        # Default path: regular message we'll keep editing with chat.update.
         res = self.client.chat_postMessage(channel=self.channel, thread_ts=self.thread_ts, text=self.placeholder)
         self.ts = res.get("ts") if isinstance(res, dict) else res["ts"]
 

@@ -150,7 +150,15 @@ class SlackMentionAgent:
             self.system_message
             or "You are an assistant for Slack mention requests. Plan work, call tools when needed, and provide concise helpful answers."
         )
-        return f"{base}\n\nRespond in language: {self.response_language}."
+        # Slack-specific rendering rules.
+        slack_rules = (
+            "When you call the `generate_image` tool, the generated image is "
+            "already uploaded inline into the Slack thread. Do NOT repeat the "
+            "image URL or permalink in your text reply — just describe or "
+            "caption the image briefly. The user sees the picture attached "
+            "directly; a URL line is duplicate noise."
+        )
+        return f"{base}\n\n{slack_rules}\n\nRespond in language: {self.response_language}."
 
     @staticmethod
     def _call_signature(call: ToolCall) -> str:
