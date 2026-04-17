@@ -4,7 +4,11 @@ frameworkVersion: "3"
 provider:
   name: aws
   runtime: python3.12
-  architecture: arm64
+  # Keep arch aligned with the GitHub Actions Ubuntu runner so pip installs
+  # wheels that match the Lambda runtime (pydantic_core, etc.). Switching
+  # back to arm64 needs a Docker-based build (serverless-python-requirements
+  # dockerizePip) or a cross-platform wheel flag — deferred.
+  architecture: x86_64
   region: ${env:AWS_REGION, 'us-east-1'}
   stage: ${opt:stage, 'dev'}
   memorySize: 5120
@@ -57,13 +61,6 @@ custom:
   pythonRequirements:
     slim: true
     layer: false
-    # Force arm64 wheels so native extensions (pydantic_core, etc.) match
-    # the Lambda runtime even when pip runs on an x86_64 GitHub runner.
-    pipCmdExtraArgs:
-      - --platform=manylinux2014_aarch64
-      - --only-binary=:all:
-      - --python-version=3.12
-      - --implementation=cp
     noDeploy:
       - pytest
       - pytest-cov
