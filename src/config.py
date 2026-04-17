@@ -1,5 +1,21 @@
 import os
 from dataclasses import dataclass
+from pathlib import Path
+
+
+def _load_env_local() -> None:
+    """Load .env.local from the project root when running locally."""
+    try:
+        from dotenv import load_dotenv
+
+        env_path = Path(__file__).resolve().parent.parent / ".env.local"
+        if env_path.exists():
+            load_dotenv(env_path, override=False)
+    except ImportError:
+        pass
+
+
+_load_env_local()
 
 
 @dataclass(frozen=True)
