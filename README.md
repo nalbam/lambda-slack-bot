@@ -32,7 +32,7 @@ Slack 멘션·DM 을 AWS Lambda 에서 처리하고, OpenAI 또는 AWS Bedrock L
   - 채널 allowlist · 유저당 동시 요청 **throttle**
   - DynamoDB 기반 **스레드 대화 메모리** (TTL 1h)
   - 긴 응답 **계층적 분할** 전송 (코드블록 → 문단 → 문장 → hard slice), `chat.update` 가 `msg_too_long` 에 걸리지 않도록 `MAX_LEN_SLACK` 기반 rolling 스트리밍 + 최종 답변 자동 split
-  - 스트리밍 `chat_postMessage` + 반복 `chat_update` fallback (네이티브 `chat.startStream`/`appendStream`/`stopStream` 은 AI 워크스페이스에서 추가 "searching" 상태 UI 를 띄워 두 개의 응답처럼 보이는 이슈 때문에 기본 비활성화, `enable_native=True` 로만 사용), `assistant_threads_setStatus` 타이핑 인디케이터
+  - 스트리밍 `chat_postMessage` + 반복 `chat_update` fallback (네이티브 `chat.startStream`/`appendStream`/`stopStream` 은 AI 워크스페이스에서 추가 "searching" 상태 UI 를 띄워 두 개의 응답처럼 보이는 이슈 때문에 기본 비활성화, `enable_native=True` 로만 사용). **회신 데이터가 없을 때** (thinking / tool_use / tool_result 단계) 는 `assistant_threads_setStatus` 로 타이핑 인디케이터만 표시하고, **첫 content delta 가 도착한 시점에** 비로소 `stream_msg.start()` 를 지연 호출해 placeholder 메시지를 posting — 상태 UI 와 placeholder 가 동시에 뜨지 않아 두 개의 응답으로 보이던 이슈 해소.
   - 구조화 JSON 로깅 + request_id, agent 루프 관찰값 기록
   - 에러 메시지 sanitize (토큰·경로 redaction)
 
@@ -194,7 +194,8 @@ DynamoDB 테이블 (해시키 `id`, GSI `user-index`, TTL `expire_at`) 은 Cloud
 - [ ] 이미지 첨부 요약 (`read_attached_images`) 동작
 - [ ] `ALLOWED_CHANNEL_IDS` 외 채널에서 차단 메시지 표시
 - [ ] Slack retry 중복 호출이 dedup 로 무시됨 (CloudWatch 로그에 `dedup.skip` 확인)
-- [ ] `assistant_threads_setStatus` 타이핑 인디케이터 표시
+- [ ] 툴 실행 중 타이핑 인디케이터 (`assistant_threads_setStatus`) 만 뜨고 placeholder 메시지는 아직 올라오지 않음 (회신 데이터가 없을 때)
+- [ ] 회신 생성이 시작되면 단일 메시지가 올라와 스트리밍으로 업데이트 됨 (상태 UI 와 placeholder 가 동시에 보이지 않음)
 - [ ] 같은 스레드 재멘션 시 이전 대화 맥락 참조
 
 ## 제외된 항목 (Phase 2 이상)

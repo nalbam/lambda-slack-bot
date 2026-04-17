@@ -172,6 +172,13 @@ def _process(event: dict, client, say, is_dm: bool) -> None:  # noqa: ANN001
     if not text:
         return
 
+    # Show a typing-style status indicator while the bot is "working" with
+    # nothing to reply yet. We intentionally do NOT post a placeholder
+    # chat.postMessage up front: that would render as a separate UI element
+    # alongside the status line (a duplicate-message look on AI workspaces).
+    # The placeholder is posted lazily in _on_stream_wrapped once the first
+    # real content delta arrives. Slack auto-clears the status when the bot
+    # posts in the thread; we also explicitly clear it after we finalize.
     set_thread_status(client, channel, thread_ts, labels["thinking"] + settings.bot_cursor)
 
     stream_msg = StreamingMessage(
@@ -182,10 +189,18 @@ def _process(event: dict, client, say, is_dm: bool) -> None:  # noqa: ANN001
         min_interval=0.6,
         max_len=settings.max_len_slack,
     )
-    try:
-        stream_msg.start()
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("streaming message start failed: %s", exc)
+
+    def _on_stream_wrapped(delta: str) -> None:
+        """Defer placeholder posting until the first real content arrives."""
+        if not delta:
+            return
+        if stream_msg.ts is None:
+            try:
+                stream_msg.start()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("deferred streaming message start failed: %s", exc)
+                return
+        stream_msg.append(delta)
 
     history_store = _get_conversations()
     history = history_store.get(thread_ts)
@@ -201,6 +216,12 @@ def _process(event: dict, client, say, is_dm: bool) -> None:  # noqa: ANN001
     )
 
     def _on_step(step_num: int, phase: str, detail: dict) -> None:
+        # While no message is posted yet, use assistant_threads.setStatus.
+        # Once the stream has started (stream_msg.ts is set), the bot message
+        # is already visible — skip status updates to avoid re-triggering the
+        # duplicate-UI problem.
+        if stream_msg.ts is not None:
+            return
         if phase == "tool_use":
             tools = ", ".join(detail.get("tools") or [])
             status = labels["using_tools"].format(tools=tools)
@@ -211,7 +232,7 @@ def _process(event: dict, client, say, is_dm: bool) -> None:  # noqa: ANN001
             status = labels["max_steps"] if detail.get("max_steps_hit") else labels["composing"]
         else:
             return
-        set_thread_status(client, channel, thread_ts, status)
+        set_thread_status(client, channel, thread_ts, status + " " + settings.bot_cursor)
 
     agent = SlackMentionAgent(
         llm=llm,
@@ -221,7 +242,7 @@ def _process(event: dict, client, say, is_dm: bool) -> None:  # noqa: ANN001
         response_language=settings.response_language,
         system_message=settings.system_message,
         history=history,
-        on_stream=stream_msg.append,
+        on_stream=_on_stream_wrapped,
         on_step=_on_step,
         max_output_tokens=settings.max_output_tokens,
     )
@@ -234,19 +255,29 @@ def _process(event: dict, client, say, is_dm: bool) -> None:  # noqa: ANN001
     except Exception as exc:  # noqa: BLE001
         logger.exception("agent failure")
         error_text = f"{labels['error_prefix']}: {sanitize_error(exc)}"
-        stream_msg.stop(error_text)
-        if stream_msg.ts is None:
+        if stream_msg.ts is not None:
+            stream_msg.stop(error_text)
+        else:
             say(text=error_text, thread_ts=thread_ts)
+        set_thread_status(client, channel, thread_ts, "")
         return
 
     final_text = result.text or "(응답을 생성하지 못했습니다)"
     # Split the answer by Slack's per-message limit. StreamingMessage.stop()
-    # now handles split internally, but keep the fallback here in case a
-    # very long final arrives after the stream was never started.
+    # handles split internally when a placeholder exists; when it doesn't
+    # (no stream deltas ever arrived — e.g. a provider that returned content
+    # all at once), we post the chunks as fresh thread messages instead.
     chunks = MessageFormatter.split_message(final_text, max_len=settings.max_len_slack)
-    stream_msg.stop(chunks[0])
+    if stream_msg.ts is not None:
+        stream_msg.stop(chunks[0])
+    else:
+        client.chat_postMessage(channel=channel, thread_ts=thread_ts, text=chunks[0])
     for extra in chunks[1:]:
         client.chat_postMessage(channel=channel, thread_ts=thread_ts, text=extra)
+    # Explicitly clear the typing-style status indicator. Slack usually
+    # auto-clears it when the bot posts a reply, but an explicit clear
+    # ensures there's no stale line left over from the last on_step update.
+    set_thread_status(client, channel, thread_ts, "")
     # NOTE: do not post `result.image_url` as a separate text message —
     # the image is already uploaded inline to the thread by the
     # generate_image tool, and the LLM's reply is instructed to omit

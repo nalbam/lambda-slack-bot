@@ -95,7 +95,12 @@ class MessageFormatter:
 
 
 def set_thread_status(client: Any, channel: str, thread_ts: str, status: str) -> None:
-    """Best-effort typing indicator. Swallows API errors (feature may not be enabled)."""
+    """Set (or clear) the assistant thread's transient status indicator.
+
+    Renders as a typing-like "... is thinking" line in AI-enabled workspaces.
+    Pass an empty string to clear it. Swallows API errors when the feature
+    is not enabled on the workspace (tier: assistant.threads).
+    """
     try:
         client.assistant_threads_setStatus(channel_id=channel, thread_ts=thread_ts, status=status)
     except (SlackApiError, AttributeError, TypeError) as exc:
