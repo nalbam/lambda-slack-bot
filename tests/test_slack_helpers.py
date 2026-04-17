@@ -245,3 +245,47 @@ def test_streaming_message_append_noop_before_start():
     sm = StreamingMessage(client=client, channel="C1", thread_ts="ts1")
     sm.append("hi")  # should not explode, ts is None
     client.api_call.assert_not_called()
+
+
+def test_streaming_message_fallback_rolls_when_buffer_exceeds_limit():
+    """In fallback mode, when the rolling buffer approaches max_len we must
+    finalize the current ts and open a fresh chat_postMessage so nothing gets
+    lost behind msg_too_long."""
+    client = MagicMock()
+    client.api_call.side_effect = SlackApiError("no", {"error": "method_deprecated"})
+    # start -> one placeholder, then every new postMessage returns a new ts
+    client.chat_postMessage.side_effect = [
+        {"ok": True, "ts": "first"},
+        {"ok": True, "ts": "second"},
+    ]
+    sm = StreamingMessage(client=client, channel="C1", thread_ts="ts1", min_interval=0.0, max_len=50)
+    sm.start()
+    # Force one flush so we have state; buffer is small.
+    sm.append("hi")
+    # Feed enough content to exceed max_len on the next flush.
+    sm.append("x" * 60)
+    # After the roll, ts should have advanced and the buffer should be empty.
+    assert sm.ts == "second"
+    assert sm._buffer == ""
+    # chat_update was used to finalize the first message content before rolling.
+    assert client.chat_update.called
+
+
+def test_streaming_message_stop_splits_long_final():
+    """A final_text longer than max_len must land in multiple messages."""
+    client = MagicMock()
+    client.api_call.side_effect = SlackApiError("no", {"error": "method_deprecated"})
+    # Return a fresh ts for every postMessage so the test is not sensitive
+    # to how many follow-ups the splitter produces.
+    client.chat_postMessage.return_value = {"ok": True, "ts": "post-ts"}
+    sm = StreamingMessage(client=client, channel="C1", thread_ts="ts1", max_len=100)
+    sm.start()
+    final = "para one " * 30 + "\n\n" + "para two " * 30 + "\n\n" + "para three " * 30
+    sm.stop(final)
+    # first chunk went to chat_update on the placeholder ts
+    assert client.chat_update.call_args.kwargs["ts"] == "post-ts"
+    # at least one follow-up post message was issued (beyond the initial placeholder)
+    follow_calls = [c for c in client.chat_postMessage.call_args_list if c.kwargs.get("thread_ts") == "ts1"]
+    assert len(follow_calls) >= 1
+
+

@@ -154,12 +154,17 @@ class StreamingMessage:
         thread_ts: str,
         placeholder: str = ":robot_face:",
         min_interval: float = 0.6,
+        max_len: int = 2000,
     ) -> None:
         self.client = client
         self.channel = channel
         self.thread_ts = thread_ts
         self.placeholder = placeholder
         self.min_interval = min_interval
+        # Soft cap for a single Slack message in fallback streaming mode;
+        # when the rolling buffer approaches this size we finalize the
+        # current ts and roll to a fresh chat_postMessage.
+        self.max_len = max_len
         self.ts: str | None = None
         self._buffer = ""
         self._last_flush = 0.0
@@ -219,33 +224,96 @@ class StreamingMessage:
             except (SlackApiError, AttributeError, TypeError) as exc:
                 logger.debug("%s failed, downgrading to chat.update: %s", self.APPEND_METHOD, exc)
                 self._native = False
-        # Fallback: chat.update with the full accumulated text plus cursor
+
+        # Fallback: chat.update with the full accumulated text plus cursor.
+        # When the buffer approaches the per-message limit we finalize this
+        # message and roll into a fresh chat_postMessage so nothing gets lost
+        # behind a msg_too_long error on the next update.
+        display = text + " " + self.placeholder
+        if len(display) >= self.max_len:
+            try:
+                self.client.chat_update(channel=self.channel, ts=self.ts, text=text)
+            except SlackApiError as exc:
+                logger.warning("chat_update (roll-finalize) failed: %s", exc)
+            self._roll_to_new_message()
+            return
         try:
-            self.client.chat_update(channel=self.channel, ts=self.ts, text=text + " " + self.placeholder)
+            self.client.chat_update(channel=self.channel, ts=self.ts, text=display)
         except SlackApiError as exc:
-            logger.debug("chat_update during stream failed: %s", exc)
+            logger.warning("chat_update during stream failed: %s", exc)
+
+    def _roll_to_new_message(self) -> None:
+        """Open a fresh placeholder message and reset the buffer. Used when
+        the fallback rolling update would overflow the per-message limit."""
+        try:
+            res = self.client.chat_postMessage(
+                channel=self.channel,
+                thread_ts=self.thread_ts,
+                text=self.placeholder,
+            )
+            self.ts = res.get("ts") if isinstance(res, dict) else res["ts"]
+            self._buffer = ""
+        except SlackApiError as exc:
+            logger.warning("roll-to-new-message failed: %s", exc)
 
     # -- stop ----------------------------------------------------------- #
 
     def stop(self, final_text: str) -> None:
-        """Finalize the message with `final_text`. Safe to call once."""
+        """Finalize the message with `final_text`. Safe to call once.
+
+        If `final_text` exceeds the per-message limit we split it with the
+        MessageFormatter, put the first chunk into the current ts, and post
+        the remaining chunks as additional thread messages. This avoids the
+        msg_too_long failures we saw when a long answer was written back
+        through a single chat.update.
+        """
         if self._stopped or not self.ts:
             return
         self._stopped = True
+
         if self._native:
+            # Native streaming: stopStream accepts up to 12k chars, but be
+            # conservative and split to self.max_len anyway to keep UX
+            # consistent with the fallback path.
+            chunks = MessageFormatter.split_message(final_text, max_len=self.max_len)
             try:
                 self.client.api_call(
                     self.STOP_METHOD,
-                    params={"channel": self.channel, "ts": self.ts, "markdown_text": final_text},
+                    params={"channel": self.channel, "ts": self.ts, "markdown_text": chunks[0]},
                 )
+                for extra in chunks[1:]:
+                    try:
+                        self.client.chat_postMessage(
+                            channel=self.channel, thread_ts=self.thread_ts, text=extra,
+                        )
+                    except SlackApiError as exc:
+                        logger.warning("follow-up postMessage failed: %s", exc)
                 return
             except (SlackApiError, AttributeError, TypeError) as exc:
                 logger.debug("%s failed, finalizing with chat.update: %s", self.STOP_METHOD, exc)
-        # Fallback finalizer
+                self._native = False
+
+        # Fallback finalizer: split and roll.
+        chunks = MessageFormatter.split_message(final_text, max_len=self.max_len)
+        first = chunks[0]
         try:
-            self.client.chat_update(channel=self.channel, ts=self.ts, text=final_text)
+            self.client.chat_update(channel=self.channel, ts=self.ts, text=first)
         except SlackApiError as exc:
-            logger.warning("final chat_update failed: %s", exc)
+            logger.warning("final chat_update failed (len=%d): %s", len(first), exc)
+            # Fallback to postMessage so at least the text lands somewhere.
+            try:
+                self.client.chat_postMessage(
+                    channel=self.channel, thread_ts=self.thread_ts, text=first,
+                )
+            except SlackApiError as exc2:
+                logger.warning("final postMessage also failed: %s", exc2)
+        for extra in chunks[1:]:
+            try:
+                self.client.chat_postMessage(
+                    channel=self.channel, thread_ts=self.thread_ts, text=extra,
+                )
+            except SlackApiError as exc:
+                logger.warning("follow-up postMessage failed: %s", exc)
 
 
 @dataclass

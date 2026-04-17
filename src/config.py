@@ -102,7 +102,7 @@ class Settings:
             aws_region=os.getenv("AWS_REGION", "us-east-1").strip(),
             allowed_channel_ids=_list_env("ALLOWED_CHANNEL_IDS"),
             allowed_channel_message=os.getenv("ALLOWED_CHANNEL_MESSAGE", "").strip(),
-            max_len_slack=_int_env("MAX_LEN_SLACK", 3000, minimum=500),
+            max_len_slack=_int_env("MAX_LEN_SLACK", 2000, minimum=500),
             max_throttle_count=_int_env("MAX_THROTTLE_COUNT", 100, minimum=1),
             max_history_chars=_int_env("MAX_HISTORY_CHARS", 4000, minimum=500),
             max_output_tokens=_int_env("MAX_OUTPUT_TOKENS", 4096, minimum=256),

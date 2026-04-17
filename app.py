@@ -181,6 +181,7 @@ def _process(event: dict, client, say, is_dm: bool) -> None:  # noqa: ANN001
         thread_ts=thread_ts,
         placeholder=settings.bot_cursor,
         min_interval=0.6,
+        max_len=settings.max_len_slack,
     )
     try:
         stream_msg.start()

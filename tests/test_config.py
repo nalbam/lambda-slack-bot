@@ -33,7 +33,7 @@ def test_defaults(monkeypatch, reload_config):
     assert s.image_model == "gpt-image-1"
     assert s.response_language == "ko"
     assert s.agent_max_steps == 3
-    assert s.max_len_slack == 3000
+    assert s.max_len_slack == 2000
     assert s.allowed_channel_ids == []
     assert s.tavily_api_key is None
 
