@@ -52,7 +52,14 @@ def _ctx(event=None, slack_client=None, llm=None):
 
 def test_default_registry_has_expected_tools():
     names = set(default_registry.names())
-    assert {"read_attached_images", "fetch_thread_history", "search_web", "generate_image"}.issubset(names)
+    assert {
+        "read_attached_images",
+        "fetch_thread_history",
+        "search_web",
+        "generate_image",
+        "get_current_time",
+        "read_attached_document",
+    }.issubset(names)
     assert "search_slack_messages" not in names  # removed — user-token only, tied to installer
 
 
