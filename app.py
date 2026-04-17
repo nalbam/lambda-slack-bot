@@ -25,13 +25,17 @@ from src.dedup import ConversationStore, DedupStore
 from src.llm import get_llm
 from src.logging_utils import get_logger, log_event, set_request_id
 from src.slack_helpers import (
+    MessageFormatter,
+    StreamingMessage,
     channel_allowed,
     sanitize_error,
-    send_long_message,
     set_thread_status,
-    throttled,
     user_name_cache,
 )
+
+
+def _split_for_slack(text: str, max_len: int) -> list[str]:
+    return MessageFormatter.split_message(text, max_len=max_len)
 from src.tools import ToolContext, ToolExecutor, default_registry
 
 settings = Settings.from_env()
@@ -49,7 +53,11 @@ LABELS = {
         "error_prefix": "요청 처리 중 오류가 발생했습니다",
         "throttled": "잠시 후 다시 시도해주세요. 처리 중인 요청이 많습니다.",
         "thinking": "생각 중... ",
-        "max_steps": "답변을 정리 중... ",
+        "max_steps": "답변 정리 중... ",
+        "using_tools": "도구 사용 중: {tools}",
+        "tool_ok": "도구 완료: {tool}",
+        "tool_failed": "도구 실패: {tool}",
+        "composing": "답변 작성 중...",
     },
     "en": {
         "generated_image": "Generated image",
@@ -57,6 +65,10 @@ LABELS = {
         "throttled": "Too many in-flight requests. Please try again shortly.",
         "thinking": "Thinking... ",
         "max_steps": "Finalizing... ",
+        "using_tools": "Running tools: {tools}",
+        "tool_ok": "Finished: {tool}",
+        "tool_failed": "Failed: {tool}",
+        "composing": "Composing the answer...",
     },
 }
 
@@ -163,12 +175,17 @@ def _process(event: dict, client, say, is_dm: bool) -> None:  # noqa: ANN001
 
     set_thread_status(client, channel, thread_ts, labels["thinking"] + settings.bot_cursor)
 
+    stream_msg = StreamingMessage(
+        client=client,
+        channel=channel,
+        thread_ts=thread_ts,
+        placeholder=settings.bot_cursor,
+        min_interval=0.6,
+    )
     try:
-        placeholder = say(text=settings.bot_cursor, thread_ts=thread_ts)
-        placeholder_ts = placeholder.get("ts") if isinstance(placeholder, dict) else None
+        stream_msg.start()
     except Exception as exc:  # noqa: BLE001
-        logger.warning("placeholder say failed: %s", exc)
-        placeholder_ts = None
+        logger.warning("streaming message start failed: %s", exc)
 
     history_store = _get_conversations()
     history = history_store.get(thread_ts)
@@ -183,17 +200,18 @@ def _process(event: dict, client, say, is_dm: bool) -> None:  # noqa: ANN001
         llm=llm,
     )
 
-    stream_ts = placeholder_ts
-
-    def _stream_update(partial: str) -> None:
-        if not stream_ts:
+    def _on_step(step_num: int, phase: str, detail: dict) -> None:
+        if phase == "tool_use":
+            tools = ", ".join(detail.get("tools") or [])
+            status = labels["using_tools"].format(tools=tools)
+        elif phase == "tool_result":
+            key = "tool_ok" if detail.get("ok") else "tool_failed"
+            status = labels[key].format(tool=detail.get("tool") or "")
+        elif phase == "compose":
+            status = labels["max_steps"] if detail.get("max_steps_hit") else labels["composing"]
+        else:
             return
-        try:
-            client.chat_update(channel=channel, ts=stream_ts, text=partial + " " + settings.bot_cursor)
-        except Exception as exc:  # noqa: BLE001
-            logger.debug("chat_update stream failed: %s", exc)
-
-    on_stream = throttled(_stream_update, min_interval=0.6)
+        set_thread_status(client, channel, thread_ts, status)
 
     agent = SlackMentionAgent(
         llm=llm,
@@ -203,7 +221,8 @@ def _process(event: dict, client, say, is_dm: bool) -> None:  # noqa: ANN001
         response_language=settings.response_language,
         system_message=settings.system_message,
         history=history,
-        on_stream=on_stream,
+        on_stream=stream_msg.append,
+        on_step=_on_step,
     )
 
     user_name = user_name_cache.get(client, user) if user else ""
@@ -214,24 +233,19 @@ def _process(event: dict, client, say, is_dm: bool) -> None:  # noqa: ANN001
     except Exception as exc:  # noqa: BLE001
         logger.exception("agent failure")
         error_text = f"{labels['error_prefix']}: {sanitize_error(exc)}"
-        if placeholder_ts:
-            try:
-                client.chat_update(channel=channel, ts=placeholder_ts, text=error_text)
-            except Exception:  # noqa: BLE001
-                say(text=error_text, thread_ts=thread_ts)
-        else:
+        stream_msg.stop(error_text)
+        if stream_msg.ts is None:
             say(text=error_text, thread_ts=thread_ts)
         return
 
     final_text = result.text or "(응답을 생성하지 못했습니다)"
-    send_long_message(
-        client=client,
-        channel=channel,
-        thread_ts=thread_ts,
-        text=final_text,
-        first_ts=placeholder_ts,
-        max_len=settings.max_len_slack,
-    )
+    # If the final text fits into one Slack message, finalize the stream with it.
+    # Otherwise, close the stream with the first chunk and post remaining chunks
+    # as new thread messages (send_long_message pattern).
+    chunks = _split_for_slack(final_text, settings.max_len_slack)
+    stream_msg.stop(chunks[0])
+    for extra in chunks[1:]:
+        client.chat_postMessage(channel=channel, thread_ts=thread_ts, text=extra)
     if result.image_url:
         say(text=f"{labels['generated_image']}: {result.image_url}", thread_ts=thread_ts)
 

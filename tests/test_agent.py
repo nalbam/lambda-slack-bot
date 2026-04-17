@@ -172,6 +172,62 @@ def test_agent_forces_final_compose_at_max_steps():
     assert result.steps == 2
 
 
+def test_agent_on_step_fires_for_tool_use_and_compose():
+    reg = _registry_with_search()
+    events: list[tuple[int, str, dict]] = []
+    llm = ScriptedLLM(
+        [
+            LLMResult(
+                content="",
+                tool_calls=[ToolCall(id="c1", name="search_web", arguments={"query": "x"})],
+                stop_reason="tool_use",
+            ),
+            LLMResult(content="done", tool_calls=[], stop_reason="end_turn"),
+        ]
+    )
+    agent = SlackMentionAgent(
+        llm=llm,
+        context=_ctx(),
+        registry=reg,
+        max_steps=3,
+        on_step=lambda step, phase, detail: events.append((step, phase, detail)),
+    )
+    agent.run("q")
+    phases = [p for _, p, _ in events]
+    assert "tool_use" in phases
+    assert "tool_result" in phases
+    assert "compose" in phases
+    # compose should fire on the second hop (step=2) without max_steps_hit flag
+    compose_events = [e for e in events if e[1] == "compose"]
+    assert compose_events[0][2].get("max_steps_hit") is not True
+
+
+def test_agent_streams_final_answer_when_on_stream_set():
+    reg = _registry_with_search()
+    delta_buffer: list[str] = []
+
+    class StreamingLLM(ScriptedLLM):
+        def stream_chat(self, system, messages, on_delta, max_tokens=1024):
+            # emit three deltas
+            for chunk in ["재미있", "는 답변", "입니다"]:
+                on_delta(chunk)
+            return "재미있는 답변입니다"
+
+    llm = StreamingLLM(
+        [LLMResult(content="fallback-should-be-ignored", tool_calls=[], stop_reason="end_turn")]
+    )
+    agent = SlackMentionAgent(
+        llm=llm,
+        context=_ctx(),
+        registry=reg,
+        max_steps=3,
+        on_stream=delta_buffer.append,
+    )
+    result = agent.run("q")
+    assert delta_buffer == ["재미있", "는 답변", "입니다"]
+    assert result.text == "재미있는 답변입니다"
+
+
 def test_agent_aggregates_token_usage():
     reg = _registry_with_search()
     llm = ScriptedLLM(
