@@ -21,11 +21,56 @@ python -m pytest tests/test_agent.py::test_agent_runs_tool_then_returns_text -v
 
 # Deploy (requires IAM OIDC role `lambda-slack-bot`)
 npm i -g serverless@3
-npm i serverless-python-requirements serverless-dotenv-plugin
+npm i serverless-python-requirements
+# export SLACK_BOT_TOKEN / SLACK_SIGNING_SECRET / OPENAI_API_KEY / ... first
 serverless deploy --stage dev --region us-east-1
 ```
 
 Lambda entrypoint: `app.lambda_handler`. Slack events land at `POST /slack/events` via API Gateway.
+
+## Core agent pipeline — DO NOT bypass or shortcut
+
+Every user turn flows through the same four phases, in order:
+
+```
+질문 (user message)
+  ↓
+의도·계획 (intent + plan — one LLM hop; native function calling emits
+           tool_calls in the same response when tools are needed)
+  ↓
+툴 사용 (tool execution — repeats as the LLM keeps calling tools)
+  ↓
+응답 (compose the final answer once the LLM stops requesting tools)
+```
+
+"의도 파악" and "계획" are a single step in code: one call to
+`LLMProvider.chat(..., tools=registry.specs())`. The LLM's response
+carries both the interpretation of the user request AND the proposed
+tool_calls (if any) in one shot. Do NOT split this into a separate
+intent-classifier hop — that adds a full LLM roundtrip for no gain
+and diverges from native function-calling semantics.
+
+**Design rules — invariants for future changes:**
+
+1. **Intent is always an LLM decision.** Never use keyword heuristics
+   (e.g., `"그려"`/`"draw"` → image generator) to bypass the agent.
+   The LLM reads the message and emits `tool_calls` to reflect intent.
+2. **No phase shortcuts.** Even for "obvious" image requests, we still
+   go through the full hop: LLM plan → `generate_image` tool_call → tool
+   execution → LLM compose. Skipping the compose step to save seconds
+   means the bot can't caption, follow up, or react to tool errors.
+3. **Tool orchestration happens inside the agent loop**, not in
+   `app.py`. `app.py` wires Slack concerns (placeholder, streaming,
+   history). `src/agent.py` owns the loop. Don't push intent
+   detection out of the agent.
+4. **Slowness is a streaming / infrastructure problem, not a
+   pipeline-shortcut problem.** If the loop is slow, fix it with
+   async invocation, model choice, or streaming UX — not by
+   stripping phases.
+
+If a future change is tempted to add a keyword or rule-based intent
+branch "just for images", the answer is no: route it through the
+agent like everything else.
 
 ## Architecture — the non-obvious parts
 
@@ -66,9 +111,11 @@ Image generation is family-routed too: Titan/Nova-Canvas use `TEXT_IMAGE` task; 
 
 Enum/int validation quietly falls back to defaults with a warning: invalid `LLM_PROVIDER=mystery` → `openai`, `AGENT_MAX_STEPS=not-int` → `3`, below-minimum values clamp up.
 
-### Streaming only on the final step
+### Streaming runs on every LLM hop
 
-The agent streams only after all tool calls resolve (via `stream_chat` in `_compose_without_tools`). Mid-loop LLM calls are non-streaming to keep `tool_calls` parsing simple. `throttled(fn, 0.6)` in `app.py` coalesces stream deltas into ~0.6s `chat_update` intervals on the placeholder so Slack isn't hammered.
+`OpenAIProvider.chat(on_delta=...)` switches into `stream=True` and forwards content deltas as they arrive. When the model starts a `tool_calls` delta (preamble like "Let me search..."), forwarding is suppressed — that pre-tool commentary would leak into the final reply. Tool_calls are accumulated across chunks and returned alongside the content. The agent passes `self.on_stream` into every `chat()` call, so when the LLM decides to answer directly (no tools) the user sees tokens immediately. A separate `stream_chat()` path still exists for the forced compose at `max_steps` and for Bedrock paths that don't yet support tool+stream natively.
+
+Stream throttling is handled inside `StreamingMessage.append()` (`min_interval=0.6s`), not by a wrapper in `app.py`. `StreamingMessage` also rolls into a fresh `chat_postMessage` when the fallback buffer approaches `max_len`, and `stop()` splits an oversized final answer using `MessageFormatter` so no single update hits Slack's `msg_too_long` error.
 
 ### Structured logging with request_id
 
@@ -77,7 +124,7 @@ The agent streams only after all tool calls resolve (via `stream_chat` in `_comp
 ## Deployment
 
 `serverless.yml` provisions:
-- Lambda: python3.12, arm64, 5120MB, 90s timeout.
+- Lambda: python3.12, x86_64, 5120MB, 90s timeout. (x86_64 matches the Ubuntu GitHub Actions runner so pip installs wheels — including native ones like `pydantic_core` — that run on the Lambda runtime. Switching to arm64 requires a Docker-based build path via serverless-python-requirements and is deferred.)
 - DynamoDB: hash `id`, GSI `user-index` (user + expire_at, KEYS_ONLY), TTL `expire_at`.
 - IAM: `dynamodb:GetItem/PutItem/Query` on table + GSI, `bedrock:InvokeModel*`/`Converse*`.
 

@@ -2,6 +2,22 @@
 
 Slack 멘션·DM 을 AWS Lambda 에서 처리하고, OpenAI 또는 AWS Bedrock LLM 으로 네이티브 **function calling** 기반 툴 오케스트레이션을 수행하는 봇입니다. `lambda-gurumi-ai-bot`·`lambda-slack-ai-bot` 의 대체를 목표로 합니다.
 
+## 봇의 처리 흐름 (절대 생략하지 않는다)
+
+모든 사용자 메시지는 다음 네 단계를 **순서대로** 통과합니다:
+
+```
+질문 ── 의도·계획 ── 툴 사용 (반복) ── 응답
+ (user)    (LLM)        (tools)        (LLM)
+```
+
+**의도 파악과 계획은 한 번의 LLM 호출로 통합**되어 있습니다 (OpenAI / Claude / Nova 의 native function calling). 같은 응답에 "무슨 요청인지 파악한 결과" 와 "다음에 부를 tool_calls" 가 함께 담겨 옵니다. 별도의 intent 분류 hop 을 추가하지 않습니다.
+
+- **의도·계획은 LLM 이 한다.** 키워드 매칭(예: `"그려"` → 이미지)으로 우회하지 않는다. LLM 이 메시지를 읽고 `tool_calls` 로 의도를 표현한다.
+- **단계 단축 금지.** 이미지 요청처럼 명확해 보여도 `LLM 판단 → generate_image tool → LLM 응답 합성` 전 과정을 거친다. 응답 합성 단계를 건너뛰면 caption·후속 대응·에러 처리가 사라진다.
+- **Agent 루프는 `src/agent.py` 안에** 있고, `app.py` 는 Slack 관련 부분(placeholder, streaming, 히스토리) 만 담당한다.
+- **속도 문제는 파이프라인 단축이 아닌** 스트리밍·비동기·모델 선택으로 해결한다.
+
 ## 주요 기능
 
 - **이벤트**: `app_mention`, DM(`message.im`)
@@ -16,8 +32,8 @@ Slack 멘션·DM 을 AWS Lambda 에서 처리하고, OpenAI 또는 AWS Bedrock L
   - DynamoDB 조건부 put 으로 Slack 재시도 **중복 제거**
   - 채널 allowlist · 유저당 동시 요청 **throttle**
   - DynamoDB 기반 **스레드 대화 메모리** (TTL 1h)
-  - 긴 응답 **3단계 분할** 전송 (코드블록 → 문단 → 문장)
-  - 스트리밍 `chat_update`, `assistant_threads_setStatus` 타이핑 인디케이터
+  - 긴 응답 **3단계 분할** 전송 (코드블록 → 문단 → 문장), `chat.update` 가 `msg_too_long` 에 걸리지 않도록 `MAX_LEN_SLACK` 기반 rolling 스트리밍 + 최종 답변 자동 split
+  - 스트리밍 `chat_update` (`chat.startStream`/`appendStream`/`stopStream` 지원, 미지원 워크스페이스는 fallback), `assistant_threads_setStatus` 타이핑 인디케이터
   - 구조화 JSON 로깅 + request_id, agent 루프 관찰값 기록
   - 에러 메시지 sanitize (토큰·경로 redaction)
 
@@ -39,7 +55,8 @@ Slack 멘션·DM 을 AWS Lambda 에서 처리하고, OpenAI 또는 AWS Bedrock L
 | `AWS_REGION` | | `us-east-1` | AWS 리전 |
 | `ALLOWED_CHANNEL_IDS` | | (empty) | 콤마 구분. 비어있으면 모든 채널 허용 |
 | `ALLOWED_CHANNEL_MESSAGE` | | — | 비허용 채널 응답 메시지 |
-| `MAX_LEN_SLACK` | | `3000` | 메시지 분할 기준 (≥500) |
+| `MAX_LEN_SLACK` | | `2000` | 메시지 분할 기준 (≥500). Slack `chat.update` 의 한계 회피용 안전 margin. |
+| `MAX_OUTPUT_TOKENS` | | `4096` | LLM hop 당 출력 토큰 상한 (≥256) |
 | `MAX_THROTTLE_COUNT` | | `100` | 유저별 동시 요청 상한 |
 | `MAX_HISTORY_CHARS` | | `4000` | 저장되는 대화 직렬화 최대 길이 |
 | `BOT_CURSOR` | | `:robot_face:` | 플레이스홀더·스트림 인디케이터 이모지 |
@@ -94,7 +111,7 @@ aws iam attach-role-policy --role-name "${NAME}" --policy-arn "arn:aws:iam::${AC
 ### 2. GitHub 저장소 설정
 
 - **Secrets**: `AWS_ACCOUNT_ID`, `SLACK_BOT_TOKEN`, `SLACK_SIGNING_SECRET`, `OPENAI_API_KEY`, `TAVILY_API_KEY`(선택)
-- **Variables**: `LLM_PROVIDER`, `LLM_MODEL`, `IMAGE_PROVIDER`, `IMAGE_MODEL`, `RESPONSE_LANGUAGE`, `ALLOWED_CHANNEL_IDS`, `ALLOWED_CHANNEL_MESSAGE`, `SYSTEM_MESSAGE`, `BOT_CURSOR`, `MAX_LEN_SLACK`, `MAX_THROTTLE_COUNT`, `MAX_HISTORY_CHARS`, `AGENT_MAX_STEPS`, `LOG_LEVEL`
+- **Variables**: `LLM_PROVIDER`, `LLM_MODEL`, `IMAGE_PROVIDER`, `IMAGE_MODEL`, `RESPONSE_LANGUAGE`, `ALLOWED_CHANNEL_IDS`, `ALLOWED_CHANNEL_MESSAGE`, `SYSTEM_MESSAGE`, `BOT_CURSOR`, `MAX_LEN_SLACK`, `MAX_OUTPUT_TOKENS`, `MAX_THROTTLE_COUNT`, `MAX_HISTORY_CHARS`, `AGENT_MAX_STEPS`, `LOG_LEVEL`
 
 ### 3. 배포
 
