@@ -137,3 +137,10 @@ def test_doc_limits_honor_env_and_clamp(monkeypatch, reload_config):
     assert s.max_doc_chars == 5000
     assert s.max_doc_pages == 1
     assert s.max_doc_bytes == 65_536
+
+
+def test_default_timezone_custom_value(monkeypatch, reload_config):
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("DEFAULT_TIMEZONE", "America/New_York")
+    s = reload_config()
+    assert s.default_timezone == "America/New_York"
