@@ -17,6 +17,7 @@ from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeou
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
+from botocore.exceptions import BotoCoreError, ClientError
 from slack_sdk.errors import SlackApiError
 
 from src.config import Settings
@@ -121,7 +122,16 @@ class ToolExecutor:
         except FuturesTimeout:
             logger.warning("tool %s timed out after %.1fs", call.name, effective_timeout)
             return {"ok": False, "error": f"tool '{call.name}' timed out after {effective_timeout}s"}
-        except (TypeError, ValueError, KeyError, urllib.error.URLError, json.JSONDecodeError, SlackApiError) as exc:
+        except (
+            TypeError,
+            ValueError,
+            KeyError,
+            urllib.error.URLError,
+            json.JSONDecodeError,
+            SlackApiError,
+            BotoCoreError,
+            ClientError,
+        ) as exc:
             logger.exception("tool %s failed", call.name)
             return {"ok": False, "error": f"{exc.__class__.__name__}: {exc}"}
 

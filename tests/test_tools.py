@@ -92,6 +92,36 @@ def test_executor_timeout_guards_slow_tools():
     assert "timed out" in result["error"]
 
 
+def test_executor_wraps_boto_client_error():
+    """Bedrock invoke failures (botocore ClientError) must be returned as
+    {ok: False, error: ...} so the LLM can plan around the failure instead
+    of the exception bubbling out of the agent loop."""
+    from botocore.exceptions import ClientError
+
+    registry = ToolRegistry()
+
+    def failing_bedrock(ctx):
+        raise ClientError(
+            {"Error": {"Code": "ResourceNotFoundException", "Message": "Legacy model"}},
+            "InvokeModel",
+        )
+
+    from src.tools import ToolDef
+
+    registry.register(
+        ToolDef(
+            name="bedrock_thing",
+            description="",
+            parameters={"type": "object", "properties": {}},
+            fn=failing_bedrock,
+        )
+    )
+    executor = ToolExecutor(_ctx(), registry)
+    result = executor.execute(ToolCall(id="1", name="bedrock_thing", arguments={}))
+    assert result["ok"] is False
+    assert "ResourceNotFoundException" in result["error"] or "Legacy" in result["error"]
+
+
 def test_executor_captures_tool_error():
     registry = ToolRegistry()
 

@@ -343,6 +343,22 @@ class OpenAIProvider:
 # --------------------------------------------------------------------------- #
 
 
+_INFERENCE_PROFILE_PREFIXES = ("us.", "eu.", "apac.", "global.")
+
+
+def _strip_inference_profile_prefix(model_id: str) -> str:
+    """Return the bare family id from a Bedrock model or inference-profile id.
+
+    Inference profile IDs prefix the family with a region routing hint, e.g.
+    `us.anthropic.claude-haiku-4-5-20251001-v1:0`. For family-level routing
+    ("is this a Claude? a Nova? Titan?") we care about the bare portion.
+    """
+    for p in _INFERENCE_PROFILE_PREFIXES:
+        if model_id.startswith(p):
+            return model_id[len(p):]
+    return model_id
+
+
 class BedrockProvider:
     def __init__(self, model: str, image_model: str, region: str):
         self.model = model
@@ -354,6 +370,14 @@ class BedrockProvider:
         if self._client is None:
             self._client = boto3.client("bedrock-runtime", region_name=self.region)
         return self._client
+
+    @property
+    def _text_family(self) -> str:
+        return _strip_inference_profile_prefix(self.model)
+
+    @property
+    def _image_family(self) -> str:
+        return _strip_inference_profile_prefix(self.image_model)
 
     # -- text / tool use ---------------------------------------------------- #
 
@@ -369,9 +393,10 @@ class BedrockProvider:
         # accept the on_delta parameter for API compatibility but use the
         # blocking path, then emit the final content as a single delta so
         # callers still receive *something* through the streaming channel.
-        if self.model.startswith("anthropic.claude"):
+        family = self._text_family
+        if family.startswith("anthropic.claude"):
             result = self._claude_chat(system, messages, tools, max_tokens)
-        elif self.model.startswith("amazon.nova"):
+        elif family.startswith("amazon.nova"):
             result = self._nova_chat(system, messages, tools, max_tokens)
         else:
             result = self._claude_chat(system, messages, None, max_tokens)
@@ -504,7 +529,8 @@ class BedrockProvider:
         # Bedrock streaming implementation: Claude Messages stream or Converse stream.
         client = self._get_client()
         full = ""
-        if self.model.startswith("anthropic.claude"):
+        family = self._text_family
+        if family.startswith("anthropic.claude"):
             body = {
                 "anthropic_version": "bedrock-2023-05-31",
                 "max_tokens": max_tokens,
@@ -573,13 +599,14 @@ class BedrockProvider:
         return self._extract_image_bytes(payload)
 
     def _build_image_body(self, prompt: str) -> dict[str, Any]:
-        if self.image_model.startswith("amazon.titan-image") or self.image_model.startswith("amazon.nova-canvas"):
+        family = self._image_family
+        if family.startswith("amazon.titan-image") or family.startswith("amazon.nova-canvas"):
             return {
                 "taskType": "TEXT_IMAGE",
                 "textToImageParams": {"text": prompt},
                 "imageGenerationConfig": {"numberOfImages": 1, "quality": "standard", "height": 1024, "width": 1024},
             }
-        if self.image_model.startswith("stability."):
+        if family.startswith("stability."):
             return {"text_prompts": [{"text": prompt}], "cfg_scale": 7, "steps": 30, "seed": 0}
         raise ValueError(f"unsupported Bedrock image model: {self.image_model}")
 

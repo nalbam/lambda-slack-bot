@@ -252,6 +252,45 @@ def _bedrock_response(payload: dict):
     return {"body": body}
 
 
+def test_bedrock_inference_profile_routes_to_claude():
+    """us.anthropic.claude-* inference profile IDs must still hit the Claude
+    path (tool_use, messages API), not the unknown-family fallback."""
+    provider = BedrockProvider(
+        model="us.anthropic.claude-opus-4-6-v1",
+        image_model="amazon.nova-canvas-v1:0",
+        region="us-east-1",
+    )
+    provider._client = MagicMock()
+    provider._client.invoke_model.return_value = _bedrock_response(
+        {
+            "content": [{"type": "text", "text": "hi"}],
+            "stop_reason": "end_turn",
+            "usage": {"input_tokens": 1, "output_tokens": 2},
+        }
+    )
+    tools = [{"name": "search_web", "description": "", "parameters": {"type": "object"}}]
+    result = provider.chat(system="s", messages=[], tools=tools)
+    assert result.content == "hi"
+    # Claude body carries tools (not Nova's toolConfig)
+    body = provider._client.invoke_model.call_args.kwargs["body"]
+    import json as _json
+
+    parsed = _json.loads(body)
+    assert "tools" in parsed  # routed into _claude_chat, not fallback
+    assert parsed["tools"][0]["name"] == "search_web"
+
+
+def test_bedrock_inference_profile_image_routing():
+    """global./us. prefixed image model IDs still reach the Titan/Nova body."""
+    provider = BedrockProvider(
+        model="us.anthropic.claude-opus-4-6-v1",
+        image_model="us.amazon.nova-canvas-v1:0",
+        region="us-east-1",
+    )
+    body = provider._build_image_body("cat")
+    assert body["taskType"] == "TEXT_IMAGE"
+
+
 def test_bedrock_claude_chat_text():
     provider = BedrockProvider(
         model="anthropic.claude-3-5-sonnet-20240620-v1:0",
