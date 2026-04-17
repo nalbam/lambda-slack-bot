@@ -377,3 +377,23 @@ def test_generate_image_returns_permalink():
     out = generate_image(ctx, prompt="cat")
     assert out == {"permalink": "https://slack/abc", "title": "t"}
     llm.generate_image.assert_called_once_with("cat")
+
+
+# --------------------------------------------------------------------------- #
+# get_current_time
+# --------------------------------------------------------------------------- #
+
+
+def test_get_current_time_uses_default_timezone():
+    from src.tools import get_current_time
+
+    ctx = _ctx()  # _settings() default_timezone defaults to Asia/Seoul
+    out = get_current_time(ctx)
+    assert out["timezone"] == "Asia/Seoul"
+    assert out["iso"].endswith("+09:00")
+    # Weekday is a full English day name (Monday..Sunday)
+    assert out["weekday"] in {
+        "Monday", "Tuesday", "Wednesday", "Thursday",
+        "Friday", "Saturday", "Sunday",
+    }
+    assert isinstance(out["unix"], int)
