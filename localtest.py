@@ -1,28 +1,35 @@
-"""
-Local CLI test script – runs the SlackMentionAgent without an actual Slack connection.
+"""Local CLI test script — runs SlackMentionAgent without a real Slack connection.
 
 Usage:
-    python local_test.py "질문 내용"
-    python local_test.py          # interactive mode (reads from stdin)
+    python localtest.py "질문 내용"
+    python localtest.py              # interactive mode (stdin, Ctrl+D to submit)
+    python localtest.py --stream "질문 내용"   # show streaming deltas
 
 Environment:
-    Copy .env.example to .env.local and fill in real values before running.
-    At minimum, set OPENAI_API_KEY (and SLACK_BOT_TOKEN if you want real Slack tool calls).
+    Copy .env.example to .env.local and fill in values before running.
+    Minimum required: OPENAI_API_KEY (for OpenAI provider).
 """
+from __future__ import annotations
 
-import sys
-import types
+import argparse
 import logging
+import sys
+import time
+from pathlib import Path
+
 
 logging.basicConfig(level=logging.WARNING, format="%(levelname)s %(name)s: %(message)s")
 
 
-# ---------------------------------------------------------------------------
-# Stub Slack WebClient so Slack-dependent tools degrade gracefully when no
-# real SLACK_BOT_TOKEN is provided (or the token is invalid).
-# ---------------------------------------------------------------------------
+LOCAL_UPLOAD_DIR = Path("./.uploads")
+
+
 class _StubSlackClient:
-    """Returns empty but structurally correct responses for every Slack call."""
+    """Returns empty but structurally correct responses for every Slack call.
+
+    `files_upload_v2` writes the received bytes to ./.uploads/ so you can
+    actually open generated images instead of discarding them.
+    """
 
     def conversations_replies(self, **_):
         return {"messages": []}
@@ -30,49 +37,62 @@ class _StubSlackClient:
     def search_messages(self, **_):
         return {"messages": {"matches": []}}
 
-    def files_upload_v2(self, **_):
-        return {"file": {"permalink": "", "title": "generated.png"}}
+    def files_upload_v2(self, *, file=None, filename="generated.bin", **_):
+        if file is None:
+            return {"file": {"permalink": "", "title": filename}}
+        LOCAL_UPLOAD_DIR.mkdir(exist_ok=True)
+        ts = int(time.time() * 1000)
+        path = LOCAL_UPLOAD_DIR / f"{ts}-{filename}"
+        path.write_bytes(file)
+        resolved = path.resolve()
+        return {"file": {"permalink": resolved.as_uri(), "title": filename}}
+
+    def users_info(self, **_):
+        return {"user": {"profile": {"display_name": "local-user"}}}
 
 
 def _build_slack_client(token: str):
     if token and not token.startswith("xoxb-your"):
         try:
             from slack_sdk import WebClient
+
             return WebClient(token=token)
         except Exception:
             pass
     return _StubSlackClient()
 
 
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
 def main() -> None:
-    # .env.local is loaded automatically inside src/config.py
-    from src.config import Settings
-    from src.llm import LLMClient
-    from src.tools import ToolContext, ToolExecutor
+    parser = argparse.ArgumentParser(description="Local agent test runner.")
+    parser.add_argument("question", nargs="*", help="Question text. If omitted, read from stdin.")
+    parser.add_argument("--stream", action="store_true", help="Print streaming deltas as they arrive.")
+    args = parser.parse_args()
+
     from src.agent import SlackMentionAgent
+    from src.config import Settings
+    from src.llm import get_llm
+    from src.tools import ToolContext, default_registry
 
     settings = Settings.from_env()
 
     if not settings.slack_bot_token or settings.slack_bot_token.startswith("xoxb-your"):
-        print("[경고] SLACK_BOT_TOKEN이 설정되지 않았습니다. Slack 관련 도구는 빈 결과를 반환합니다.\n")
-    if not settings.llm_provider == "bedrock":
+        print("[경고] SLACK_BOT_TOKEN 미설정 — Slack 관련 도구는 빈 결과를 반환합니다.\n")
+    if settings.llm_provider == "openai":
         import os
+
         if not os.getenv("OPENAI_API_KEY"):
             print("[오류] OPENAI_API_KEY가 설정되지 않았습니다. .env.local 을 확인하세요.")
             sys.exit(1)
 
-    llm = LLMClient(
+    llm = get_llm(
         provider=settings.llm_provider,
         model=settings.llm_model,
         image_provider=settings.image_provider,
         image_model=settings.image_model,
+        region=settings.aws_region,
     )
 
     slack_client = _build_slack_client(settings.slack_bot_token)
-
     context = ToolContext(
         slack_client=slack_client,
         channel="local",
@@ -82,18 +102,8 @@ def main() -> None:
         llm=llm,
     )
 
-    agent = SlackMentionAgent(
-        llm=llm,
-        context=context,
-        max_steps=settings.agent_max_steps,
-        response_language=settings.response_language,
-    )
-
-    # ------------------------------------------------------------------
-    # Get user message from CLI arg or stdin
-    # ------------------------------------------------------------------
-    if len(sys.argv) > 1:
-        user_message = " ".join(sys.argv[1:])
+    if args.question:
+        user_message = " ".join(args.question).strip()
     else:
         print("질문을 입력하세요 (Ctrl+D 로 종료):")
         try:
@@ -109,16 +119,41 @@ def main() -> None:
     print(f"\n▶ 질문: {user_message}\n")
     print("처리 중...\n")
 
+    on_stream = None
+    if args.stream:
+        def on_stream(delta: str) -> None:  # noqa: RUF013
+            sys.stdout.write(delta)
+            sys.stdout.flush()
+
+    agent = SlackMentionAgent(
+        llm=llm,
+        context=context,
+        registry=default_registry,
+        max_steps=settings.agent_max_steps,
+        response_language=settings.response_language,
+        system_message=settings.system_message,
+        on_stream=on_stream,
+    )
+
     try:
         result = agent.run(user_message)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[오류] {exc}")
+        sys.exit(1)
+
+    if not args.stream:
         print("─" * 60)
         print(result.text)
         if result.image_url:
             print(f"\n[이미지] {result.image_url}")
         print("─" * 60)
-    except Exception as exc:
-        print(f"[오류] {exc}")
-        sys.exit(1)
+    else:
+        print()
+
+    print(
+        f"\nsteps={result.steps} tool_calls={result.tool_calls_count} "
+        f"tokens_in={result.token_usage.get('input', 0)} tokens_out={result.token_usage.get('output', 0)}"
+    )
 
 
 if __name__ == "__main__":
