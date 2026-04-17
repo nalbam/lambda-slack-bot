@@ -78,24 +78,18 @@ python -m pytest --cov=src --cov-report=term-missing
 
 ### 1. IAM OIDC role 준비 (한 번만)
 
-GitHub OIDC provider 와 role 이름 `lambda-slack-bot` 을 계정에 생성합니다. trust policy 예:
+`role/lambda-slack-bot` 을 AWS 계정에 생성하고 GitHub OIDC trust + 배포용 policy 를 연결합니다. 템플릿과 상세 절차는 `.github/aws-role/` 에 있습니다:
 
-```json
-{
-  "Version": "2012-10-17",
-  "Statement": [{
-    "Effect": "Allow",
-    "Principal": {"Federated": "arn:aws:iam::<AWS_ACCOUNT_ID>:oidc-provider/token.actions.githubusercontent.com"},
-    "Action": "sts:AssumeRoleWithWebIdentity",
-    "Condition": {
-      "StringEquals": {"token.actions.githubusercontent.com:aud": "sts.amazonaws.com"},
-      "StringLike": {"token.actions.githubusercontent.com:sub": "repo:<OWNER>/lambda-slack-bot:*"}
-    }
-  }]
-}
+```bash
+cd .github/aws-role
+export NAME="lambda-slack-bot"
+aws iam create-role --role-name "${NAME}" --assume-role-policy-document file://trust-policy.json
+aws iam create-policy --policy-name "${NAME}" --policy-document file://role-policy.json
+export ACCOUNT_ID=$(aws sts get-caller-identity | jq -r .Account)
+aws iam attach-role-policy --role-name "${NAME}" --policy-arn "arn:aws:iam::${ACCOUNT_ID}:policy/${NAME}"
 ```
 
-Role 에는 CloudFormation, Lambda, IAM PassRole, DynamoDB, API Gateway, Bedrock 권한 정책을 연결하세요.
+`trust-policy.json` 은 `nalbam/lambda-slack-bot` repo 의 OIDC 토큰을, `role-policy.json` 은 CloudFormation / Lambda / IAM / S3 / DynamoDB / API Gateway / CloudWatch Logs 권한을 (`lambda-slack-bot-*` 스코프) 포함합니다.
 
 ### 2. GitHub 저장소 설정
 
