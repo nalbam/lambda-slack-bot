@@ -1,6 +1,6 @@
 # lambda-slack-bot
 
-Slack 멘션·DM 을 AWS Lambda 에서 처리하고, OpenAI 또는 AWS Bedrock LLM 으로 네이티브 **function calling** 기반 툴 오케스트레이션을 수행하는 봇입니다.
+Slack 멘션·DM 을 AWS Lambda 에서 처리하고, OpenAI · AWS Bedrock · xAI(Grok) LLM 으로 네이티브 **function calling** 기반 툴 오케스트레이션을 수행하는 봇입니다.
 
 ## 봇의 처리 흐름 (절대 생략하지 않는다)
 
@@ -55,7 +55,7 @@ Slack 멘션·DM 을 AWS Lambda 에서 처리하고, OpenAI 또는 AWS Bedrock L
 | `AWS_REGION` | | `us-east-1` | AWS 리전 |
 | `ALLOWED_CHANNEL_IDS` | | (empty) | 콤마 구분. 비어있으면 모든 채널 허용 |
 | `ALLOWED_CHANNEL_MESSAGE` | | — | 비허용 채널 응답 메시지 |
-| `MAX_LEN_SLACK` | | `2000` | 메시지 분할 기준 (≥500). Slack `chat.update` 의 한계 회피용 안전 margin. |
+| `MAX_LEN_SLACK` | | `3000` | 메시지 분할 기준 (≥500). Slack `chat.update` 의 한계 회피용 안전 margin. `.env.example` / `serverless.yml` 기본값. 변수 자체가 미설정이면 `config.py` fallback `2000`. |
 | `MAX_OUTPUT_TOKENS` | | `4096` | LLM hop 당 출력 토큰 상한 (≥256) |
 | `MAX_THROTTLE_COUNT` | | `100` | 유저별 동시 요청 상한 |
 | `MAX_HISTORY_CHARS` | | `4000` | 저장되는 대화 직렬화 최대 길이 |
@@ -82,10 +82,11 @@ pip install -r requirements-dev.txt
 
 cp .env.example .env.local      # 값 채우기
 
-# CLI 실행
+# CLI 실행 (스트리밍이 기본값)
 python localtest.py "오늘 서울 날씨"
-python localtest.py --stream "React 훅 설명해줘"
-python localtest.py              # 대화형
+python localtest.py --no-stream "React 훅 설명해줘"   # 전체 답변을 한 번에 출력
+python localtest.py --quiet-steps "…"                # 중간 step 로그 숨김
+python localtest.py                                  # 대화형 (stdin, Ctrl+D)
 
 # 테스트
 python -m pytest --cov=src --cov-report=term-missing

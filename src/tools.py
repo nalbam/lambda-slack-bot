@@ -1,4 +1,4 @@
-"""Tool registry + 5 built-in tools with JSON Schema specs.
+"""Tool registry + 4 built-in tools with JSON Schema specs.
 
 Tools are declared once via the `@tool(...)` decorator. The same registry
 produces JSON Schemas for LLM function calling AND the executor's dispatch

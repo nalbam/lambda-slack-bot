@@ -9,10 +9,11 @@ pip install -r requirements.txt
 pip install -r requirements-dev.txt
 cp .env.example .env.local   # fill in values
 
-# Local CLI runner (no Slack connection needed)
+# Local CLI runner (no Slack connection needed; streaming is default)
 python localtest.py "질문"
-python localtest.py --stream "질문"
-python localtest.py                  # interactive stdin
+python localtest.py --no-stream "질문"   # wait for full answer, then print
+python localtest.py --quiet-steps "질문" # hide intermediate step logs
+python localtest.py                       # interactive stdin (Ctrl+D)
 
 # Tests
 python -m pytest
