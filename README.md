@@ -27,6 +27,8 @@ Slack 멘션·DM 을 AWS Lambda 에서 처리하고, OpenAI · AWS Bedrock · xA
   - `fetch_thread_history` — 스레드 히스토리 조회
   - `search_web` — Tavily (TAVILY_API_KEY 설정 시) 또는 DuckDuckGo
   - `generate_image` — 이미지 생성 후 Slack 업로드
+  - `get_current_time` — 서버 기본 TZ(또는 `timezone` 인자) 로 현재 시각/요일 반환
+  - `read_attached_document` — 첨부 PDF/텍스트 파일 추출 (페이지·바이트·문자 상한 적용)
 - **Production 기반**
   - DynamoDB 조건부 put 으로 Slack 재시도 **중복 제거**
   - 채널 allowlist · 유저당 동시 요청 **throttle**
@@ -59,6 +61,10 @@ Slack 멘션·DM 을 AWS Lambda 에서 처리하고, OpenAI · AWS Bedrock · xA
 | `MAX_OUTPUT_TOKENS` | | `4096` | LLM hop 당 출력 토큰 상한 (≥256) |
 | `MAX_THROTTLE_COUNT` | | `100` | 유저별 동시 요청 상한 |
 | `MAX_HISTORY_CHARS` | | `4000` | 저장되는 대화 직렬화 최대 길이 |
+| `DEFAULT_TIMEZONE` | | `Asia/Seoul` | `get_current_time` 기본 TZ (IANA). 잘못된 이름이면 기본값으로 폴백 + 경고 |
+| `MAX_DOC_CHARS` | | `20000` | `read_attached_document` 추출 텍스트 최대 문자수 (≥1000) |
+| `MAX_DOC_PAGES` | | `50` | `read_attached_document` PDF 최대 페이지수 (≥1) |
+| `MAX_DOC_BYTES` | | `26214400` | `read_attached_document` 다운로드 최대 바이트 (기본 25MB, ≥65536) |
 | `BOT_CURSOR` | | `:robot_face:` | 플레이스홀더·스트림 인디케이터 이모지 |
 | `SYSTEM_MESSAGE` | | — | 시스템 프롬프트 오버라이드 |
 | `LOG_LEVEL` | | `INFO` | 로그 레벨 |
@@ -114,7 +120,7 @@ aws iam attach-role-policy --role-name "${NAME}" --policy-arn "arn:aws:iam::${AC
 ### 2. GitHub 저장소 설정
 
 - **Secrets**: `AWS_ACCOUNT_ID`, `SLACK_BOT_TOKEN`, `SLACK_SIGNING_SECRET`, `OPENAI_API_KEY`, `XAI_API_KEY`(xAI 사용 시), `TAVILY_API_KEY`(선택)
-- **Variables**: `LLM_PROVIDER`, `LLM_MODEL`, `IMAGE_PROVIDER`, `IMAGE_MODEL`, `RESPONSE_LANGUAGE`, `ALLOWED_CHANNEL_IDS`, `ALLOWED_CHANNEL_MESSAGE`, `SYSTEM_MESSAGE`, `BOT_CURSOR`, `MAX_LEN_SLACK`, `MAX_OUTPUT_TOKENS`, `MAX_THROTTLE_COUNT`, `MAX_HISTORY_CHARS`, `AGENT_MAX_STEPS`, `LOG_LEVEL`
+- **Variables**: `LLM_PROVIDER`, `LLM_MODEL`, `IMAGE_PROVIDER`, `IMAGE_MODEL`, `RESPONSE_LANGUAGE`, `ALLOWED_CHANNEL_IDS`, `ALLOWED_CHANNEL_MESSAGE`, `SYSTEM_MESSAGE`, `BOT_CURSOR`, `MAX_LEN_SLACK`, `MAX_OUTPUT_TOKENS`, `MAX_THROTTLE_COUNT`, `MAX_HISTORY_CHARS`, `AGENT_MAX_STEPS`, `LOG_LEVEL`, `DEFAULT_TIMEZONE`, `MAX_DOC_CHARS`, `MAX_DOC_PAGES`, `MAX_DOC_BYTES`
 
 ### 3. 배포
 
@@ -193,6 +199,7 @@ DynamoDB 테이블 (해시키 `id`, GSI `user-index`, TTL `expire_at`) 은 Cloud
 - [ ] 긴 응답이 여러 청크로 쪼개져 스레드에 전송됨
 - [ ] 이미지 생성 요청 (`"고양이 그려줘"`) 이 업로드됨
 - [ ] 이미지 첨부 요약 (`read_attached_images`) 동작
+- [ ] PDF/텍스트 첨부 요약 (`read_attached_document`) 이 페이지·문자 상한 안에서 동작 (암호화 PDF 는 오류 반환)
 - [ ] `ALLOWED_CHANNEL_IDS` 외 채널에서 차단 메시지 표시
 - [ ] Slack retry 중복 호출이 dedup 로 무시됨 (CloudWatch 로그에 `dedup.skip` 확인)
 - [ ] 툴 실행 중 타이핑 인디케이터 (`assistant_threads_setStatus`) 만 뜨고 placeholder 메시지는 아직 올라오지 않음 (회신 데이터가 없을 때)

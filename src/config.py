@@ -40,6 +40,21 @@ def _int_env(name: str, default: int, minimum: int = 1) -> int:
     return value
 
 
+def _tz_env(name: str, default: str) -> str:
+    """Return a validated IANA timezone name, warning + falling back on bad input."""
+    from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return default
+    try:
+        ZoneInfo(raw)
+    except ZoneInfoNotFoundError:
+        logger.warning("invalid %s=%r, falling back to %s", name, raw, default)
+        return default
+    return raw
+
+
 def _list_env(name: str) -> list[str]:
     raw = os.getenv(name, "").strip()
     if not raw or raw.lower() == "none":
@@ -78,6 +93,10 @@ class Settings:
     tavily_api_key: str | None = None
     xai_api_key: str | None = None
     log_level: str = "INFO"
+    default_timezone: str = "Asia/Seoul"
+    max_doc_chars: int = 20_000
+    max_doc_pages: int = 50
+    max_doc_bytes: int = 25 * 1024 * 1024
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -113,6 +132,10 @@ class Settings:
             tavily_api_key=tavily_key,
             xai_api_key=xai_key,
             log_level=os.getenv("LOG_LEVEL", "INFO").strip().upper() or "INFO",
+            default_timezone=_tz_env("DEFAULT_TIMEZONE", "Asia/Seoul"),
+            max_doc_chars=_int_env("MAX_DOC_CHARS", 20_000, minimum=1000),
+            max_doc_pages=_int_env("MAX_DOC_PAGES", 50, minimum=1),
+            max_doc_bytes=_int_env("MAX_DOC_BYTES", 25 * 1024 * 1024, minimum=64 * 1024),
         )
 
     def require_slack_credentials(self) -> None:

@@ -52,7 +52,14 @@ def _ctx(event=None, slack_client=None, llm=None):
 
 def test_default_registry_has_expected_tools():
     names = set(default_registry.names())
-    assert {"read_attached_images", "fetch_thread_history", "search_web", "generate_image"}.issubset(names)
+    assert {
+        "read_attached_images",
+        "fetch_thread_history",
+        "search_web",
+        "generate_image",
+        "get_current_time",
+        "read_attached_document",
+    }.issubset(names)
     assert "search_slack_messages" not in names  # removed — user-token only, tied to installer
 
 
@@ -377,3 +384,357 @@ def test_generate_image_returns_permalink():
     out = generate_image(ctx, prompt="cat")
     assert out == {"permalink": "https://slack/abc", "title": "t"}
     llm.generate_image.assert_called_once_with("cat")
+
+
+# --------------------------------------------------------------------------- #
+# get_current_time
+# --------------------------------------------------------------------------- #
+
+
+def test_get_current_time_uses_default_timezone():
+    from src.tools import get_current_time
+
+    ctx = _ctx()  # _settings() default_timezone defaults to Asia/Seoul
+    out = get_current_time(ctx)
+    assert out["timezone"] == "Asia/Seoul"
+    assert out["iso"].endswith("+09:00")
+    # Weekday is a full English day name (Monday..Sunday)
+    assert out["weekday"] in {
+        "Monday", "Tuesday", "Wednesday", "Thursday",
+        "Friday", "Saturday", "Sunday",
+    }
+    assert isinstance(out["unix"], int)
+
+
+def test_get_current_time_respects_custom_timezone():
+    from src.tools import get_current_time
+
+    ctx = _ctx()
+    out = get_current_time(ctx, timezone="UTC")
+    assert out["timezone"] == "UTC"
+    assert out["iso"].endswith("+00:00")
+
+
+def test_get_current_time_invalid_tz_via_executor():
+    """Invalid timezone should surface as {ok: False, error: ...} via the
+    executor so the LLM can recover."""
+    from src.tools import default_registry
+
+    executor = ToolExecutor(_ctx(), default_registry)
+    result = executor.execute(
+        ToolCall(id="t1", name="get_current_time", arguments={"timezone": "Narnia/Center"})
+    )
+    assert result["ok"] is False
+    assert "unknown timezone" in result["error"]
+
+
+# --------------------------------------------------------------------------- #
+# read_attached_document
+# --------------------------------------------------------------------------- #
+
+
+def test_read_attached_document_text_file():
+    from src.tools import read_attached_document
+
+    event = {
+        "files": [
+            {
+                "mimetype": "text/plain",
+                "url_private_download": "https://files.slack.com/notes.txt",
+                "name": "notes.txt",
+            }
+        ]
+    }
+    ctx = _ctx(event=event)
+    body = b"Hello\n  world.\nLine 3."
+    with patch("src.tools.urllib.request.urlopen") as opener:
+        resp = opener.return_value.__enter__.return_value
+        resp.read.return_value = body
+        resp.headers = {"Content-Length": str(len(body))}
+        out = read_attached_document(ctx, limit=1)
+    assert len(out) == 1
+    entry = out[0]
+    assert entry["name"] == "notes.txt"
+    assert entry["mimetype"] == "text/plain"
+    assert entry["truncated"] is False
+    assert "Hello" in entry["text"]
+    assert entry["chars"] == len(entry["text"])
+    assert entry["pages"] == 0  # text files report 0 pages
+
+
+def _build_pdf_bytes(pages_text: list[str]) -> bytes:
+    """Build a minimal PDF (one page per string) using reportlab. Test-only."""
+    from io import BytesIO
+    from reportlab.pdfgen.canvas import Canvas
+    from reportlab.lib.pagesizes import letter
+
+    buf = BytesIO()
+    canvas = Canvas(buf, pagesize=letter)
+    for text in pages_text:
+        canvas.drawString(72, 720, text)
+        canvas.showPage()
+    canvas.save()
+    return buf.getvalue()
+
+
+def _mock_pdf_response(opener, body: bytes, headers=None):
+    """Wire the urlopen mock to stream `body` in chunks through `_fetch_slack_file`."""
+    resp = opener.return_value.__enter__.return_value
+    buf = {"pos": 0}
+
+    def _chunked(n=-1):
+        if n == -1:
+            remaining = body[buf["pos"]:]
+            buf["pos"] = len(body)
+            return remaining
+        chunk = body[buf["pos"]:buf["pos"] + n]
+        buf["pos"] += len(chunk)
+        return chunk
+
+    resp.read.side_effect = _chunked
+    resp.headers = dict(headers or {"Content-Length": str(len(body)), "Content-Type": "application/pdf"})
+
+
+def test_read_attached_document_pdf_happy_path():
+    from src.tools import read_attached_document
+
+    pdf = _build_pdf_bytes(["Hello PDF page one.", "Page two here."])
+    event = {
+        "files": [
+            {
+                "mimetype": "application/pdf",
+                "url_private_download": "https://files.slack.com/report.pdf",
+                "name": "report.pdf",
+            }
+        ]
+    }
+    ctx = _ctx(event=event)
+    with patch("src.tools.urllib.request.urlopen") as opener:
+        _mock_pdf_response(opener, pdf)
+        out = read_attached_document(ctx, limit=1)
+    assert len(out) == 1
+    entry = out[0]
+    assert entry["name"] == "report.pdf"
+    assert entry["pages"] == 2
+    assert entry["truncated"] is False
+    assert entry["chars"] > 0
+
+
+def test_read_attached_document_pdf_truncation():
+    from src.tools import read_attached_document
+
+    pdf = _build_pdf_bytes(["A" * 500])
+    event = {
+        "files": [
+            {
+                "mimetype": "application/pdf",
+                "url_private_download": "https://files.slack.com/big.pdf",
+                "name": "big.pdf",
+            }
+        ]
+    }
+    ctx = _ctx(
+        event=event,
+    )
+    ctx = ToolContext(
+        slack_client=ctx.slack_client,
+        channel=ctx.channel,
+        thread_ts=ctx.thread_ts,
+        event=ctx.event,
+        settings=_settings(max_doc_chars=50),
+        llm=ctx.llm,
+    )
+    with patch("src.tools.urllib.request.urlopen") as opener:
+        _mock_pdf_response(opener, pdf)
+        out = read_attached_document(ctx, limit=1)
+    assert out[0]["truncated"] is True
+    assert out[0]["chars"] == 50
+
+
+def test_read_attached_document_page_cap():
+    from src.tools import read_attached_document
+
+    pdf = _build_pdf_bytes(["p1", "p2", "p3"])
+    event = {
+        "files": [
+            {
+                "mimetype": "application/pdf",
+                "url_private_download": "https://files.slack.com/pages.pdf",
+                "name": "pages.pdf",
+            }
+        ]
+    }
+    ctx = ToolContext(
+        slack_client=MagicMock(),
+        channel="C1",
+        thread_ts="ts1",
+        event=event,
+        settings=_settings(max_doc_pages=2),
+        llm=MagicMock(),
+    )
+    with patch("src.tools.urllib.request.urlopen") as opener:
+        _mock_pdf_response(opener, pdf)
+        out = read_attached_document(ctx, limit=1)
+    assert "error" in out[0]
+    assert "MAX_DOC_PAGES" in out[0]["error"]
+
+
+def test_read_attached_document_size_cap_via_content_length():
+    from src.tools import read_attached_document
+
+    event = {
+        "files": [
+            {
+                "mimetype": "text/plain",
+                "url_private_download": "https://files.slack.com/huge.txt",
+                "name": "huge.txt",
+            }
+        ]
+    }
+    ctx = ToolContext(
+        slack_client=MagicMock(),
+        channel="C1",
+        thread_ts="ts1",
+        event=event,
+        settings=_settings(max_doc_bytes=100),  # tiny cap
+        llm=MagicMock(),
+    )
+    with patch("src.tools.urllib.request.urlopen") as opener:
+        resp = opener.return_value.__enter__.return_value
+        resp.headers = {"Content-Length": "200"}  # > cap
+        resp.read.return_value = b"x" * 10  # should never be read past cap
+        out = read_attached_document(ctx, limit=1)
+    assert "error" in out[0]
+    assert "MAX_DOC_BYTES" in out[0]["error"]
+
+
+def test_read_attached_document_size_cap_via_streamed_read():
+    from src.tools import read_attached_document
+
+    event = {
+        "files": [
+            {
+                "mimetype": "text/plain",
+                "url_private_download": "https://files.slack.com/nohead.txt",
+                "name": "nohead.txt",
+            }
+        ]
+    }
+    ctx = ToolContext(
+        slack_client=MagicMock(),
+        channel="C1",
+        thread_ts="ts1",
+        event=event,
+        settings=_settings(max_doc_bytes=100),
+        llm=MagicMock(),
+    )
+    body = b"y" * 200
+    with patch("src.tools.urllib.request.urlopen") as opener:
+        resp = opener.return_value.__enter__.return_value
+        resp.headers = {}  # no Content-Length
+        buf = {"pos": 0}
+
+        def _chunked(n=-1):
+            if n == -1:
+                remaining = body[buf["pos"]:]
+                buf["pos"] = len(body)
+                return remaining
+            chunk = body[buf["pos"]:buf["pos"] + n]
+            buf["pos"] += len(chunk)
+            return chunk
+
+        resp.read.side_effect = _chunked
+        out = read_attached_document(ctx, limit=1)
+    assert "error" in out[0]
+    assert "MAX_DOC_BYTES" in out[0]["error"]
+
+
+def test_read_attached_document_rejects_non_slack_host():
+    from src.tools import read_attached_document
+
+    ctx = _ctx()
+    out = read_attached_document(
+        ctx, urls=["https://evil.example.com/foo.pdf"], limit=1
+    )
+    assert len(out) == 1
+    assert "error" in out[0]
+    assert "invalid" in out[0]["error"].lower()
+
+
+def test_read_attached_document_skips_encrypted_pdf():
+    from src.tools import read_attached_document
+    from io import BytesIO
+    from pypdf import PdfWriter
+
+    writer = PdfWriter()
+    writer.add_blank_page(width=612, height=792)
+    # NOTE: pypdf>=4.0 uses keyword-only user_password. If requirements.txt's
+    # upper pin is ever relaxed past 6.0, verify this signature still holds.
+    writer.encrypt(user_password="secret")
+    buf = BytesIO()
+    writer.write(buf)
+    encrypted_pdf = buf.getvalue()
+
+    event = {
+        "files": [
+            {
+                "mimetype": "application/pdf",
+                "url_private_download": "https://files.slack.com/enc.pdf",
+                "name": "enc.pdf",
+            }
+        ]
+    }
+    ctx = _ctx(event=event)
+    with patch("src.tools.urllib.request.urlopen") as opener:
+        _mock_pdf_response(opener, encrypted_pdf)
+        out = read_attached_document(ctx, limit=1)
+    assert "error" in out[0]
+    assert "encrypted" in out[0]["error"]
+
+
+def test_read_attached_document_skips_image_mime():
+    from src.tools import read_attached_document
+
+    event = {
+        "files": [
+            {
+                "mimetype": "image/png",
+                "url_private_download": "https://files.slack.com/a.png",
+                "name": "a.png",
+            }
+        ]
+    }
+    ctx = _ctx(event=event)
+    # urlopen should NOT be called — image MIMEs are filtered before fetch
+    with patch("src.tools.urllib.request.urlopen") as opener:
+        out = read_attached_document(ctx, limit=1)
+    opener.assert_not_called()
+    assert out == []
+
+
+def test_read_attached_document_http_error_returns_per_item():
+    from src.tools import read_attached_document
+    import urllib.error
+
+    event = {
+        "files": [
+            {
+                "mimetype": "application/pdf",
+                "url_private_download": "https://files.slack.com/missing.pdf",
+                "name": "missing.pdf",
+            }
+        ]
+    }
+    ctx = _ctx(event=event)
+    with patch("src.tools.urllib.request.urlopen") as opener:
+        opener.side_effect = urllib.error.HTTPError(
+            url="https://files.slack.com/missing.pdf",
+            code=404,
+            msg="Not Found",
+            hdrs=None,
+            fp=None,
+        )
+        out = read_attached_document(ctx, limit=1)
+    assert len(out) == 1
+    assert "error" in out[0]
+    assert "404" in out[0]["error"]

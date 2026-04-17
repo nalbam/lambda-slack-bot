@@ -1,4 +1,4 @@
-"""Tool registry + 4 built-in tools with JSON Schema specs.
+"""Tool registry + 6 built-in tools with JSON Schema specs.
 
 Tools are declared once via the `@tool(...)` decorator. The same registry
 produces JSON Schemas for LLM function calling AND the executor's dispatch
@@ -30,6 +30,8 @@ logger = logging.getLogger(__name__)
 SLACK_FILE_HOSTS = {"files.slack.com", "files-edge.slack.com", "files-pri.slack.com"}
 DUCKDUCKGO_HOST = "api.duckduckgo.com"
 TAVILY_HOST = "api.tavily.com"
+DOC_TEXT_PREFIX = "text/"
+DOC_PDF_MIME = "application/pdf"
 
 
 # --------------------------------------------------------------------------- #
@@ -232,6 +234,184 @@ def _filename_from_url(url: str) -> str:
     return name or "image"
 
 
+def _fetch_slack_file(url: str, token: str, max_bytes: int) -> tuple[bytes, str]:
+    """Fetch a Slack file with size guard. Returns (body, mimetype_from_header).
+
+    Raises:
+      ValueError: on disallowed host, oversize via Content-Length, or
+                  oversize discovered while reading the body.
+    """
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme != "https" or parsed.hostname not in SLACK_FILE_HOSTS:
+        raise ValueError("invalid Slack file download URL")
+    req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
+    with urllib.request.urlopen(req, timeout=15) as response:  # noqa: S310
+        content_length = response.headers.get("Content-Length") if response.headers else None
+        if content_length and content_length.isdigit() and int(content_length) > max_bytes:
+            raise ValueError(f"document exceeds MAX_DOC_BYTES={max_bytes}")
+        body = response.read(max_bytes + 1)
+        if len(body) > max_bytes:
+            raise ValueError(f"document exceeds MAX_DOC_BYTES={max_bytes}")
+        mime = (response.headers.get("Content-Type", "") or "").split(";", 1)[0].strip().lower() if response.headers else ""
+    return body, mime
+
+
+def _parse_pdf(
+    data: bytes,
+    max_pages: int,
+    max_chars: int,
+) -> tuple[str, int, bool]:
+    """Extract text from a PDF. Raises ValueError for recoverable issues so the
+    caller can emit a per-document error entry."""
+    from io import BytesIO
+
+    # Deferred import keeps pypdf out of cold-start for requests that never
+    # touch this tool.
+    from pypdf import PdfReader
+    from pypdf.errors import PdfReadError, DependencyError
+
+    try:
+        reader = PdfReader(BytesIO(data))
+    except PdfReadError as exc:
+        raise ValueError(f"PdfReadError: {exc}") from exc
+    if reader.is_encrypted:
+        raise ValueError("encrypted PDF not supported")
+    page_count = len(reader.pages)
+    if page_count > max_pages:
+        raise ValueError(f"document exceeds MAX_DOC_PAGES={max_pages}")
+    pieces: list[str] = []
+    total = 0
+    truncated = False
+    for page in reader.pages:
+        try:
+            piece = page.extract_text() or ""
+        except (PdfReadError, DependencyError) as exc:
+            raise ValueError(f"PdfReadError: {exc}") from exc
+        pieces.append(piece)
+        total += len(piece)
+        if total >= max_chars:
+            truncated = True
+            break
+    text = "\n".join(pieces)
+    if len(text) > max_chars:
+        text = text[:max_chars]
+        truncated = True
+    return text, page_count, truncated
+
+
+def _parse_text(data: bytes, max_chars: int) -> tuple[str, bool]:
+    text = data.decode("utf-8", errors="replace")
+    truncated = len(text) > max_chars
+    if truncated:
+        text = text[:max_chars]
+    return text, truncated
+
+
+@tool(
+    default_registry,
+    name="read_attached_document",
+    description=(
+        "Read PDF or text/* files attached to the current Slack mention "
+        "(and optionally extra URLs on files*.slack.com) and return the "
+        "extracted text. Images are skipped — use read_attached_images "
+        "for those. Returns one entry per document; if a document fails "
+        "(encrypted, oversize, corrupt) the entry carries an 'error' key."
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "limit": {"type": "integer", "minimum": 1, "maximum": 5, "default": 2},
+            "urls": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Extra Slack file URLs (must be on files*.slack.com).",
+            },
+        },
+        "required": [],
+    },
+    timeout=30.0,
+)
+def read_attached_document(
+    ctx: ToolContext,
+    limit: int = 2,
+    urls: list[str] | None = None,
+) -> list[dict[str, Any]]:
+    token = ctx.settings.slack_bot_token
+    max_bytes = ctx.settings.max_doc_bytes
+    max_chars = ctx.settings.max_doc_chars
+    out: list[dict[str, Any]] = []
+    seen: set[str] = set()
+
+    def _is_doc_mime(mime: str) -> bool:
+        mime = (mime or "").lower()
+        return mime == DOC_PDF_MIME or mime.startswith(DOC_TEXT_PREFIX)
+
+    def _process(url: str, file_mime_hint: str, name: str) -> None:
+        if url in seen or len(out) >= limit:
+            return
+        seen.add(url)
+        try:
+            body, header_mime = _fetch_slack_file(url, token, max_bytes)
+        except ValueError as exc:
+            out.append({"name": name, "error": str(exc)})
+            return
+        except urllib.error.HTTPError as exc:
+            out.append({"name": name, "error": f"HTTPError: {exc.code}"})
+            return
+        mime = (header_mime or file_mime_hint or "").lower()
+        if mime == DOC_PDF_MIME:
+            try:
+                text, pages, truncated = _parse_pdf(
+                    body, ctx.settings.max_doc_pages, max_chars
+                )
+            except ValueError as exc:
+                out.append({"name": name, "error": str(exc)})
+                return
+            out.append(
+                {
+                    "name": name,
+                    "mimetype": DOC_PDF_MIME,
+                    "pages": pages,
+                    "chars": len(text),
+                    "truncated": truncated,
+                    "text": text,
+                }
+            )
+            return
+        if mime.startswith(DOC_TEXT_PREFIX):
+            text, truncated = _parse_text(body, max_chars)
+            out.append(
+                {
+                    "name": name,
+                    "mimetype": mime,
+                    "pages": 0,
+                    "chars": len(text),
+                    "truncated": truncated,
+                    "text": text,
+                }
+            )
+            return
+        # non-doc mime: silently skip (images handled by read_attached_images)
+
+    for file_info in (ctx.event.get("files") or [])[:limit]:
+        if len(out) >= limit:
+            break
+        mime = str(file_info.get("mimetype", ""))
+        if not _is_doc_mime(mime):
+            continue
+        dl = file_info.get("url_private_download") or file_info.get("url_private")
+        if not dl:
+            continue
+        _process(dl, mime, file_info.get("name", "document"))
+
+    for extra in (urls or []):
+        if len(out) >= limit:
+            break
+        _process(extra, "", _filename_from_url(extra))
+
+    return out
+
+
 @tool(
     default_registry,
     name="fetch_thread_history",
@@ -336,6 +516,46 @@ def generate_image(ctx: ToolContext, prompt: str) -> dict[str, str]:
     )
     file_info = upload.get("file", {})
     return {"permalink": file_info.get("permalink", ""), "title": file_info.get("title", "generated.png")}
+
+
+@tool(
+    default_registry,
+    name="get_current_time",
+    description=(
+        "Return the current wall-clock time. Uses the server default "
+        "timezone (DEFAULT_TIMEZONE env) unless 'timezone' is provided. "
+        "Useful for 'today', 'now', 'this week', or weekday questions."
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "timezone": {
+                "type": "string",
+                "description": (
+                    "Optional IANA timezone (e.g. 'Asia/Seoul', 'UTC', "
+                    "'America/New_York'). Omit to use the server default."
+                ),
+            }
+        },
+        "required": [],
+    },
+)
+def get_current_time(ctx: ToolContext, timezone: str | None = None) -> dict[str, Any]:
+    from datetime import datetime
+    from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+    tz_name = timezone or ctx.settings.default_timezone
+    try:
+        tz = ZoneInfo(tz_name)
+    except ZoneInfoNotFoundError as exc:
+        raise ValueError(f"unknown timezone: {tz_name}") from exc
+    now = datetime.now(tz)
+    return {
+        "iso": now.isoformat(timespec="seconds"),
+        "timezone": tz_name,
+        "weekday": now.strftime("%A"),
+        "unix": int(now.timestamp()),
+    }
 
 
 # --------------------------------------------------------------------------- #
