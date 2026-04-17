@@ -13,7 +13,6 @@ from src.tools import (
     fetch_thread_history,
     generate_image,
     read_attached_images,
-    search_slack_messages,
     search_web,
 )
 
@@ -53,7 +52,8 @@ def _ctx(event=None, slack_client=None, llm=None):
 
 def test_default_registry_has_expected_tools():
     names = set(default_registry.names())
-    assert {"read_attached_images", "fetch_thread_history", "search_slack_messages", "search_web", "generate_image"}.issubset(names)
+    assert {"read_attached_images", "fetch_thread_history", "search_web", "generate_image"}.issubset(names)
+    assert "search_slack_messages" not in names  # removed — user-token only, tied to installer
 
 
 def test_registry_specs_match_llm_shape():
@@ -191,20 +191,6 @@ def test_fetch_thread_history_shapes_output():
     client.conversations_replies.return_value = {"messages": [{"user": "U1", "text": "hi"}]}
     out = fetch_thread_history(_ctx(slack_client=client), limit=5)
     assert out == [{"user": "U1", "text": "hi"}]
-
-
-# --------------------------------------------------------------------------- #
-# search_slack_messages
-# --------------------------------------------------------------------------- #
-
-
-def test_search_slack_messages_shapes_output():
-    client = MagicMock()
-    client.search_messages.return_value = {
-        "messages": {"matches": [{"channel": {"name": "general"}, "text": "hi"}]}
-    }
-    out = search_slack_messages(_ctx(slack_client=client), query="hi", limit=1)
-    assert out == [{"channel": "general", "text": "hi"}]
 
 
 # --------------------------------------------------------------------------- #

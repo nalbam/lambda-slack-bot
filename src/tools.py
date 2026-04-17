@@ -186,30 +186,6 @@ def fetch_thread_history(ctx: ToolContext, limit: int = 20) -> list[dict[str, st
 
 @tool(
     default_registry,
-    name="search_slack_messages",
-    description="Search messages across Slack workspace by query string.",
-    parameters={
-        "type": "object",
-        "properties": {
-            "query": {"type": "string"},
-            "limit": {"type": "integer", "minimum": 1, "maximum": 30, "default": 10},
-        },
-        "required": ["query"],
-    },
-)
-def search_slack_messages(ctx: ToolContext, query: str, limit: int = 10) -> list[dict[str, str]]:
-    return _with_slack_retry(
-        lambda: ctx.slack_client.search_messages(query=query, count=limit),
-        lambda res: [
-            {"channel": m.get("channel", {}).get("name", ""), "text": m.get("text", "")}
-            for m in res.get("messages", {}).get("matches", [])
-        ],
-        label="search_messages",
-    )
-
-
-@tool(
-    default_registry,
     name="search_web",
     description="Search the public web for up-to-date information. Uses Tavily if TAVILY_API_KEY is set, otherwise DuckDuckGo Instant Answer.",
     parameters={

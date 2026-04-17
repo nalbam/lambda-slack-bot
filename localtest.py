@@ -40,9 +40,6 @@ class _StubSlackClient:
     def conversations_replies(self, **_):
         return {"messages": []}
 
-    def search_messages(self, **_):
-        return {"messages": {"matches": []}}
-
     def files_upload_v2(self, *, file=None, filename="generated.bin", **_):
         if file is None:
             return {"file": {"permalink": "", "title": filename}}

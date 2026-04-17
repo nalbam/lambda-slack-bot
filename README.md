@@ -25,7 +25,6 @@ Slack 멘션·DM 을 AWS Lambda 에서 처리하고, OpenAI 또는 AWS Bedrock L
 - **Tools (네이티브 function calling)**
   - `read_attached_images` — 첨부 이미지 Vision 요약
   - `fetch_thread_history` — 스레드 히스토리 조회
-  - `search_slack_messages` — Slack 메시지 검색
   - `search_web` — Tavily (TAVILY_API_KEY 설정 시) 또는 DuckDuckGo
   - `generate_image` — 이미지 생성 후 Slack 업로드
 - **Production 기반**
