@@ -21,11 +21,15 @@ class ScriptedLLM:
         self._results = list(results)
         self.calls: list[dict] = []
 
-    def chat(self, system, messages, tools=None, max_tokens=1024):
-        self.calls.append({"messages": list(messages), "tools": tools})
+    def chat(self, system, messages, tools=None, max_tokens=1024, on_delta=None):
+        self.calls.append({"messages": list(messages), "tools": tools, "on_delta": on_delta})
         if not self._results:
-            return LLMResult(content="(empty)", tool_calls=[], stop_reason="end_turn")
-        return self._results.pop(0)
+            result = LLMResult(content="(empty)", tool_calls=[], stop_reason="end_turn")
+        else:
+            result = self._results.pop(0)
+        if on_delta is not None and result.content and not result.tool_calls:
+            on_delta(result.content)
+        return result
 
     def stream_chat(self, system, messages, on_delta, max_tokens=1024):
         result = self.chat(system, messages)
@@ -203,19 +207,21 @@ def test_agent_on_step_fires_for_tool_use_and_compose():
 
 
 def test_agent_streams_final_answer_when_on_stream_set():
+    """When on_stream is set, chat(on_delta=...) streams content during the
+    terminal hop. The agent must not then re-call the LLM to re-stream."""
     reg = _registry_with_search()
     delta_buffer: list[str] = []
 
     class StreamingLLM(ScriptedLLM):
-        def stream_chat(self, system, messages, on_delta, max_tokens=1024):
-            # emit three deltas
-            for chunk in ["재미있", "는 답변", "입니다"]:
-                on_delta(chunk)
-            return "재미있는 답변입니다"
+        def chat(self, system, messages, tools=None, max_tokens=1024, on_delta=None):
+            self.calls.append({"on_delta": on_delta})
+            # emit three deltas through on_delta, no tool_calls
+            if on_delta is not None:
+                for chunk in ["재미있", "는 답변", "입니다"]:
+                    on_delta(chunk)
+            return LLMResult(content="재미있는 답변입니다", tool_calls=[], stop_reason="end_turn")
 
-    llm = StreamingLLM(
-        [LLMResult(content="fallback-should-be-ignored", tool_calls=[], stop_reason="end_turn")]
-    )
+    llm = StreamingLLM([])
     agent = SlackMentionAgent(
         llm=llm,
         context=_ctx(),
@@ -226,6 +232,8 @@ def test_agent_streams_final_answer_when_on_stream_set():
     result = agent.run("q")
     assert delta_buffer == ["재미있", "는 답변", "입니다"]
     assert result.text == "재미있는 답변입니다"
+    # Exactly one chat call — no compose re-call.
+    assert len(llm.calls) == 1
 
 
 def test_agent_aggregates_token_usage():

@@ -72,6 +72,101 @@ def test_openai_o1_model_uses_max_completion_tokens():
     assert "temperature" not in kwargs
 
 
+def _make_stream_chunk(*, content=None, tool_calls=None, finish=None, usage=None):
+    chunk = MagicMock()
+    if usage is not None:
+        chunk.usage = usage
+    else:
+        chunk.usage = None
+    if content is None and tool_calls is None and finish is None:
+        chunk.choices = []
+        return chunk
+    choice = MagicMock()
+    choice.finish_reason = finish
+    choice.delta.content = content
+    choice.delta.tool_calls = tool_calls
+    chunk.choices = [choice]
+    return chunk
+
+
+def _stream_tool_call(index, call_id=None, name=None, arguments=None):
+    tc = MagicMock()
+    tc.index = index
+    tc.id = call_id
+    fn = MagicMock()
+    fn.name = name
+    fn.arguments = arguments
+    tc.function = fn
+    return tc
+
+
+def test_openai_chat_streams_content_when_on_delta_given():
+    provider = OpenAIProvider(model="gpt-4o-mini", image_model="gpt-image-1")
+    provider._client = MagicMock()
+    chunks = [
+        _make_stream_chunk(content="hello"),
+        _make_stream_chunk(content=" world"),
+        _make_stream_chunk(finish="stop"),
+    ]
+    provider._client.chat.completions.create.return_value = iter(chunks)
+
+    received: list[str] = []
+    result = provider.chat(system="s", messages=[], on_delta=received.append)
+
+    assert received == ["hello", " world"]
+    assert result.content == "hello world"
+    assert result.stop_reason == "end_turn"
+    assert result.tool_calls == []
+    # must have requested streaming
+    kwargs = provider._client.chat.completions.create.call_args.kwargs
+    assert kwargs.get("stream") is True
+
+
+def test_openai_chat_stream_suppresses_content_after_tool_calls_begin():
+    provider = OpenAIProvider(model="gpt-4o-mini", image_model="gpt-image-1")
+    provider._client = MagicMock()
+    chunks = [
+        # tool_call begins first (no content yet)
+        _make_stream_chunk(tool_calls=[_stream_tool_call(0, call_id="c1", name="search_web")]),
+        _make_stream_chunk(tool_calls=[_stream_tool_call(0, arguments='{"query":')]),
+        _make_stream_chunk(tool_calls=[_stream_tool_call(0, arguments='"x"}')]),
+        # Model sometimes also emits commentary content after initiating a tool_call.
+        _make_stream_chunk(content="I'll search."),
+        _make_stream_chunk(finish="tool_calls"),
+    ]
+    provider._client.chat.completions.create.return_value = iter(chunks)
+
+    received: list[str] = []
+    result = provider.chat(
+        system="s",
+        messages=[],
+        tools=[{"name": "search_web", "description": "", "parameters": {"type": "object"}}],
+        on_delta=received.append,
+    )
+
+    # Content after tool_calls started must NOT reach on_delta.
+    assert received == []
+    assert result.tool_calls[0].name == "search_web"
+    assert result.tool_calls[0].arguments == {"query": "x"}
+    assert result.stop_reason == "tool_use"
+
+
+def test_openai_chat_stream_accumulates_usage_from_last_chunk():
+    provider = OpenAIProvider(model="gpt-4o-mini", image_model="gpt-image-1")
+    provider._client = MagicMock()
+    usage = MagicMock()
+    usage.prompt_tokens = 42
+    usage.completion_tokens = 7
+    chunks = [
+        _make_stream_chunk(content="hi"),
+        _make_stream_chunk(finish="stop", usage=usage),
+    ]
+    provider._client.chat.completions.create.return_value = iter(chunks)
+
+    result = provider.chat(system="s", messages=[], on_delta=lambda _: None)
+    assert result.token_usage == {"input": 42, "output": 7}
+
+
 def test_openai_translates_canonical_tool_calls():
     """Canonical assistant tool_calls must be serialized to OpenAI's wire format."""
     provider = OpenAIProvider(model="gpt-4o-mini", image_model="gpt-image-1")

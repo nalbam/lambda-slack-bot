@@ -167,6 +167,7 @@ def main() -> None:
         system_message=settings.system_message,
         on_stream=on_stream,
         on_step=on_step,
+        max_output_tokens=settings.max_output_tokens,
     )
 
     try:

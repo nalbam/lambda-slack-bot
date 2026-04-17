@@ -52,6 +52,7 @@ class LLMProvider(Protocol):
         messages: list[dict[str, Any]],
         tools: list[ToolSpec] | None = None,
         max_tokens: int = 1024,
+        on_delta: Callable[[str], None] | None = None,
     ) -> LLMResult: ...
 
     def stream_chat(
@@ -158,6 +159,7 @@ class OpenAIProvider:
         messages: list[dict[str, Any]],
         tools: list[ToolSpec] | None = None,
         max_tokens: int = 1024,
+        on_delta: Callable[[str], None] | None = None,
     ) -> LLMResult:
         client = self._get_client()
         payload: dict[str, Any] = {
@@ -172,6 +174,11 @@ class OpenAIProvider:
             ]
             payload["tool_choice"] = "auto"
 
+        if on_delta is None:
+            return self._chat_blocking(client, payload)
+        return self._chat_streaming(client, payload, on_delta)
+
+    def _chat_blocking(self, client, payload: dict[str, Any]) -> LLMResult:
         completion = client.chat.completions.create(**payload)
         choice = completion.choices[0]
         msg = choice.message
@@ -183,21 +190,99 @@ class OpenAIProvider:
                 args = {}
             tool_calls.append(ToolCall(id=call.id, name=call.function.name, arguments=args))
 
-        stop_reason: Literal["end_turn", "tool_use", "max_tokens", "other"] = "end_turn"
-        if choice.finish_reason == "tool_calls":
-            stop_reason = "tool_use"
-        elif choice.finish_reason == "length":
-            stop_reason = "max_tokens"
-        elif choice.finish_reason not in {"stop", None}:
-            stop_reason = "other"
+        stop_reason = self._map_finish_reason(choice.finish_reason)
+        token_usage = self._extract_usage(completion)
+        return LLMResult(content=msg.content or "", tool_calls=tool_calls, stop_reason=stop_reason, token_usage=token_usage)
 
+    def _chat_streaming(self, client, payload: dict[str, Any], on_delta: Callable[[str], None]) -> LLMResult:
+        """Stream chunks and emit content deltas until we see the model start a tool call.
+
+        Once any tool_calls delta arrives, we stop forwarding content to
+        `on_delta` for this hop — content emitted at that point is typically
+        a preface to the tool call, and we don't want to mix it into the
+        user-visible answer. tool_calls are accumulated and returned.
+        """
+        payload = {**payload, "stream": True, "stream_options": {"include_usage": True}}
+        stream = client.chat.completions.create(**payload)
+
+        content_parts: list[str] = []
+        tool_calls_accum: dict[int, dict[str, Any]] = {}
+        saw_tool_calls = False
+        finish_reason: str | None = None
+        usage_obj = None
+
+        for chunk in stream:
+            usage_obj = getattr(chunk, "usage", None) or usage_obj
+            if not chunk.choices:
+                continue
+            choice = chunk.choices[0]
+            delta = choice.delta
+            if getattr(delta, "tool_calls", None):
+                saw_tool_calls = True
+                for tc in delta.tool_calls:
+                    idx = tc.index
+                    slot = tool_calls_accum.setdefault(idx, {"id": None, "name": "", "arguments": ""})
+                    if getattr(tc, "id", None):
+                        slot["id"] = tc.id
+                    fn = getattr(tc, "function", None)
+                    if fn is not None:
+                        if getattr(fn, "name", None):
+                            slot["name"] += fn.name
+                        if getattr(fn, "arguments", None):
+                            slot["arguments"] += fn.arguments
+            if getattr(delta, "content", None):
+                content_parts.append(delta.content)
+                if not saw_tool_calls:
+                    on_delta(delta.content)
+            if getattr(choice, "finish_reason", None):
+                finish_reason = choice.finish_reason
+
+        tool_calls: list[ToolCall] = []
+        for idx in sorted(tool_calls_accum):
+            slot = tool_calls_accum[idx]
+            try:
+                args = json.loads(slot["arguments"] or "{}")
+            except json.JSONDecodeError:
+                args = {}
+            tool_calls.append(ToolCall(id=slot["id"] or "", name=slot["name"], arguments=args))
+
+        stop_reason = self._map_finish_reason(finish_reason)
+        token_usage = self._extract_usage_from_chunk(usage_obj)
+        return LLMResult(
+            content="".join(content_parts),
+            tool_calls=tool_calls,
+            stop_reason=stop_reason,
+            token_usage=token_usage,
+        )
+
+    @staticmethod
+    def _map_finish_reason(finish: str | None) -> Literal["end_turn", "tool_use", "max_tokens", "other"]:
+        if finish == "tool_calls":
+            return "tool_use"
+        if finish == "length":
+            return "max_tokens"
+        if finish in {"stop", None}:
+            return "end_turn"
+        return "other"
+
+    @staticmethod
+    def _extract_usage(completion) -> dict[str, int]:
         usage = getattr(completion, "usage", None)
-        token_usage = {
+        if not usage:
+            return {}
+        return {
             "input": getattr(usage, "prompt_tokens", 0) or 0,
             "output": getattr(usage, "completion_tokens", 0) or 0,
-        } if usage else {}
+        }
 
-        return LLMResult(content=msg.content or "", tool_calls=tool_calls, stop_reason=stop_reason, token_usage=token_usage)
+    @staticmethod
+    def _extract_usage_from_chunk(usage_obj) -> dict[str, int]:
+        if not usage_obj:
+            return {}
+        return {
+            "input": getattr(usage_obj, "prompt_tokens", 0) or 0,
+            "output": getattr(usage_obj, "completion_tokens", 0) or 0,
+        }
 
     def stream_chat(
         self,
@@ -278,13 +363,21 @@ class BedrockProvider:
         messages: list[dict[str, Any]],
         tools: list[ToolSpec] | None = None,
         max_tokens: int = 1024,
+        on_delta: Callable[[str], None] | None = None,
     ) -> LLMResult:
+        # Bedrock tool_use streaming is not yet implemented in this provider;
+        # accept the on_delta parameter for API compatibility but use the
+        # blocking path, then emit the final content as a single delta so
+        # callers still receive *something* through the streaming channel.
         if self.model.startswith("anthropic.claude"):
-            return self._claude_chat(system, messages, tools, max_tokens)
-        if self.model.startswith("amazon.nova"):
-            return self._nova_chat(system, messages, tools, max_tokens)
-        # Unknown family — plain text completion, no tools.
-        return self._claude_chat(system, messages, None, max_tokens)
+            result = self._claude_chat(system, messages, tools, max_tokens)
+        elif self.model.startswith("amazon.nova"):
+            result = self._nova_chat(system, messages, tools, max_tokens)
+        else:
+            result = self._claude_chat(system, messages, None, max_tokens)
+        if on_delta is not None and result.content and not result.tool_calls:
+            on_delta(result.content)
+        return result
 
     def _claude_chat(
         self,
@@ -605,8 +698,8 @@ class _CompositeProvider:
     text: LLMProvider
     image: LLMProvider
 
-    def chat(self, system, messages, tools=None, max_tokens=1024):
-        return self.text.chat(system, messages, tools=tools, max_tokens=max_tokens)
+    def chat(self, system, messages, tools=None, max_tokens=1024, on_delta=None):
+        return self.text.chat(system, messages, tools=tools, max_tokens=max_tokens, on_delta=on_delta)
 
     def stream_chat(self, system, messages, on_delta, max_tokens=1024):
         return self.text.stream_chat(system, messages, on_delta, max_tokens=max_tokens)

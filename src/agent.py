@@ -43,6 +43,7 @@ class SlackMentionAgent:
         history: list[dict[str, Any]] | None = None,
         on_stream: Callable[[str], None] | None = None,
         on_step: Callable[[int, str, dict[str, Any]], None] | None = None,
+        max_output_tokens: int = 4096,
     ):
         self.llm = llm
         self.context = context
@@ -55,6 +56,7 @@ class SlackMentionAgent:
         self.on_stream = on_stream
         # on_step(step_num, phase, detail) — phases: "tool_use", "tool_result", "compose"
         self.on_step = on_step
+        self.max_output_tokens = max_output_tokens
 
     def run(self, user_message: str) -> AgentResult:
         system = self._build_system_prompt()
@@ -67,16 +69,27 @@ class SlackMentionAgent:
 
         for step in range(self.max_steps):
             steps = step + 1
-            result = self.llm.chat(system, messages, tools=self.registry.specs())
+            # Pass on_stream as on_delta so the provider can stream content
+            # tokens live while still returning accumulated tool_calls. When
+            # the model starts a tool_call the provider stops forwarding
+            # content to avoid leaking the pre-tool preamble into the reply.
+            result = self.llm.chat(
+                system,
+                messages,
+                tools=self.registry.specs(),
+                max_tokens=self.max_output_tokens,
+                on_delta=self.on_stream,
+            )
             total_usage["input"] += result.token_usage.get("input", 0)
             total_usage["output"] += result.token_usage.get("output", 0)
             log_event(logger, "llm.hop", step=steps, stop=result.stop_reason, tool_calls=len(result.tool_calls))
 
             if not result.tool_calls:
                 self._notify_step(steps, "compose", {})
-                final = self._compose_final(system, messages, fallback=result.content)
+                # If on_stream was provided, the content was already streamed
+                # during this hop — don't pay for a second LLM call to re-do it.
                 return AgentResult(
-                    text=final.strip(),
+                    text=(result.content or "").strip(),
                     image_url=image_url,
                     steps=steps,
                     tool_calls_count=tool_calls_total,
@@ -164,8 +177,8 @@ class SlackMentionAgent:
         )
         messages = [*messages, {"role": "user", "content": directive}]
         if self.on_stream:
-            return self.llm.stream_chat(system, messages, on_delta=self.on_stream)
-        result = self.llm.chat(system, messages, tools=None)
+            return self.llm.stream_chat(system, messages, on_delta=self.on_stream, max_tokens=self.max_output_tokens)
+        result = self.llm.chat(system, messages, tools=None, max_tokens=self.max_output_tokens)
         return (result.content or "").strip()
 
     def _notify_step(self, step: int, phase: str, detail: dict[str, Any]) -> None:

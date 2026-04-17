@@ -223,6 +223,7 @@ def _process(event: dict, client, say, is_dm: bool) -> None:  # noqa: ANN001
         history=history,
         on_stream=stream_msg.append,
         on_step=_on_step,
+        max_output_tokens=settings.max_output_tokens,
     )
 
     user_name = user_name_cache.get(client, user) if user else ""

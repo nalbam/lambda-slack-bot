@@ -72,6 +72,7 @@ class Settings:
     max_len_slack: int = 3000
     max_throttle_count: int = 100
     max_history_chars: int = 4000
+    max_output_tokens: int = 4096
     bot_cursor: str = ":robot_face:"
     system_message: str | None = None
     tavily_api_key: str | None = None
@@ -104,6 +105,7 @@ class Settings:
             max_len_slack=_int_env("MAX_LEN_SLACK", 3000, minimum=500),
             max_throttle_count=_int_env("MAX_THROTTLE_COUNT", 100, minimum=1),
             max_history_chars=_int_env("MAX_HISTORY_CHARS", 4000, minimum=500),
+            max_output_tokens=_int_env("MAX_OUTPUT_TOKENS", 4096, minimum=256),
             bot_cursor=os.getenv("BOT_CURSOR", ":robot_face:").strip() or ":robot_face:",
             system_message=system_message,
             tavily_api_key=tavily_key,
