@@ -1,7 +1,7 @@
 import unittest
 
-from lambda_slack_bot.agent import SlackMentionAgent
-from lambda_slack_bot.tools import ToolContext
+from src.agent import SlackMentionAgent
+from src.tools import ToolContext
 
 
 class FakeLLM:

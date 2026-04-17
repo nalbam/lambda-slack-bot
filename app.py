@@ -4,10 +4,10 @@ import re
 from slack_bolt import App
 from slack_bolt.adapter.aws_lambda import SlackRequestHandler
 
-from lambda_slack_bot.agent import SlackMentionAgent
-from lambda_slack_bot.config import Settings
-from lambda_slack_bot.llm import LLMClient
-from lambda_slack_bot.tools import ToolContext
+from src.agent import SlackMentionAgent
+from src.config import Settings
+from src.llm import LLMClient
+from src.tools import ToolContext
 
 settings = Settings.from_env()
 

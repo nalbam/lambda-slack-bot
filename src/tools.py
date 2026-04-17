@@ -9,8 +9,8 @@ from typing import Any
 from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
 
-from lambda_slack_bot.config import Settings
-from lambda_slack_bot.llm import LLMClient
+from src.config import Settings
+from src.llm import LLMClient
 
 logger = logging.getLogger(__name__)
 SLACK_FILE_HOSTS = {"files.slack.com"}

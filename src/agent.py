@@ -2,8 +2,8 @@ import json
 from dataclasses import dataclass
 from typing import Any
 
-from lambda_slack_bot.llm import LLMClient
-from lambda_slack_bot.tools import ToolContext, ToolExecutor
+from src.llm import LLMClient
+from src.tools import ToolContext, ToolExecutor
 
 
 @dataclass
