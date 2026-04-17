@@ -397,3 +397,25 @@ def test_get_current_time_uses_default_timezone():
         "Friday", "Saturday", "Sunday",
     }
     assert isinstance(out["unix"], int)
+
+
+def test_get_current_time_respects_custom_timezone():
+    from src.tools import get_current_time
+
+    ctx = _ctx()
+    out = get_current_time(ctx, timezone="UTC")
+    assert out["timezone"] == "UTC"
+    assert out["iso"].endswith("+00:00")
+
+
+def test_get_current_time_invalid_tz_via_executor():
+    """Invalid timezone should surface as {ok: False, error: ...} via the
+    executor so the LLM can recover."""
+    from src.tools import default_registry
+
+    executor = ToolExecutor(_ctx(), default_registry)
+    result = executor.execute(
+        ToolCall(id="t1", name="get_current_time", arguments={"timezone": "Narnia/Center"})
+    )
+    assert result["ok"] is False
+    assert "unknown timezone" in result["error"]
